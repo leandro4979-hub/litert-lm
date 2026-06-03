@@ -161,18 +161,18 @@ TEST(PromptTemplateCustomTest, StripReplacementTest) {
     EXPECT_EQ(*res, "hello");
   }
   {
-    PromptTemplate prompt_template("{{ '  hello'.lstrip() }}");
+    PromptTemplate prompt_template("{{ '  hello  '.lstrip() }}");
     PromptTemplateInput input;
     auto res = prompt_template.Apply(input);
     ASSERT_OK(res);
-    EXPECT_EQ(*res, "hello");
+    EXPECT_EQ(*res, "hello  ");
   }
   {
-    PromptTemplate prompt_template("{{ 'hello  '.rstrip() }}");
+    PromptTemplate prompt_template("{{ '  hello  '.rstrip() }}");
     PromptTemplateInput input;
     auto res = prompt_template.Apply(input);
     ASSERT_OK(res);
-    EXPECT_EQ(*res, "hello");
+    EXPECT_EQ(*res, "  hello");
   }
   {
     PromptTemplate prompt_template("{{ 'ohelloo'.strip('o') }}");
@@ -186,14 +186,14 @@ TEST(PromptTemplateCustomTest, StripReplacementTest) {
     PromptTemplateInput input;
     auto res = prompt_template.Apply(input);
     ASSERT_OK(res);
-    EXPECT_EQ(*res, "hell");
+    EXPECT_EQ(*res, "helloo");
   }
   {
     PromptTemplate prompt_template("{{ 'ohelloo'.rstrip('o') }}");
     PromptTemplateInput input;
     auto res = prompt_template.Apply(input);
     ASSERT_OK(res);
-    EXPECT_EQ(*res, "hell");
+    EXPECT_EQ(*res, "ohell");
   }
 }
 

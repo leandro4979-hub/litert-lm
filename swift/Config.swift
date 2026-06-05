@@ -181,8 +181,11 @@ public struct ConversationConfig {
     loraPath: String? = nil,
     audioLoraPath: String? = nil
   ) {
-    self.systemMessage = systemMessage.map { msg in
-      msg.role == .system
+    self.systemMessage = systemMessage.flatMap { msg in
+      if msg.toString.isEmpty {
+        return nil
+      }
+      return msg.role == .system
         ? msg : Message(contents: msg.contents, role: .system, channels: msg.channels)
     }
     self.initialMessages = initialMessages

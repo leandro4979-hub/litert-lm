@@ -571,7 +571,8 @@ absl::StatusOr<GpuModelCacheData> GetGpuModelCacheData(
         absl::StrCat(cache_name, ExecutorSettingsBase::kMlDriftCacheSuffix),
         /*check_and_clean=*/true);
     cache_data.weight_cache_file = executor_settings.GetWeightCacheFile(
-        absl::StrCat(cache_name, ExecutorSettingsBase::kMlDriftCacheSuffix),
+        absl::StrCat(cache_name,
+                     ExecutorSettingsBase::kMlDriftWeightCacheSuffix),
         /*check_and_clean=*/true);
     if (!model_path.empty()) {
       ASSIGN_OR_RETURN(std::string metadata_id,

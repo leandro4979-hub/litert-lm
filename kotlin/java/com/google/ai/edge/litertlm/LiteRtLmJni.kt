@@ -207,6 +207,7 @@ internal object LiteRtLmJni {
    * @param filterChannelContentFromKvCache Whether to filter channel content from the KV cache.
    * @param prefillPrefaceOnInit Whether to prefill the preface when initializing the conversation.
    * @param maxOutputToken The maximum number of output tokens. When non-positive, use the default.
+   * @param thinkingConfig Configuration for thinking/reasoning generation.
    * @return A pointer to the native conversation instance.
    */
   external fun nativeCreateConversation(
@@ -223,6 +224,7 @@ internal object LiteRtLmJni {
     audioLoraPath: String?,
     prefillPrefaceOnInit: Boolean,
     maxOutputToken: Int,
+    thinkingConfig: ThinkingConfig?,
   ): Long
 
   /**
@@ -245,6 +247,7 @@ internal object LiteRtLmJni {
    * @param visualTokenBudget The visual token budget. Only supported by Gemma4 currently. Null for
    *   default.
    * @param maxOutputToken The maximum number of output tokens. When non-positive, use the default.
+   * @param thinkingConfig Configuration for thinking/reasoning generation.
    */
   external fun nativeSendMessageAsync(
     conversationPointer: Long,
@@ -253,6 +256,7 @@ internal object LiteRtLmJni {
     callback: JniMessageCallback,
     visualTokenBudget: Int?,
     maxOutputToken: Int,
+    thinkingConfig: ThinkingConfig?,
   )
 
   /**
@@ -265,6 +269,7 @@ internal object LiteRtLmJni {
    * @param visualTokenBudget The visual token budget. Only supported by Gemma4 currently. Null for
    *   default.
    * @param maxOutputToken The maximum number of output tokens. When non-positive, use the default.
+   * @param thinkingConfig Configuration for thinking/reasoning generation.
    * @return The response message in JSON string format.
    */
   external fun nativeSendMessage(
@@ -273,6 +278,7 @@ internal object LiteRtLmJni {
     extraContextJsonString: String,
     visualTokenBudget: Int?,
     maxOutputToken: Int,
+    thinkingConfig: ThinkingConfig?,
   ): String
 
   /**

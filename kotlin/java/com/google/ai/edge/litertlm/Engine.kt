@@ -160,6 +160,7 @@ class Engine(val engineConfig: EngineConfig) : AutoCloseable {
           conversationConfig.loraConfig?.audioLoraPath,
           conversationConfig.prefillPrefaceOnInit,
           conversationConfig.maxOutputToken ?: -1,
+          conversationConfig.thinkingConfig,
         ),
         toolManager,
         conversationConfig.automaticToolCalling,

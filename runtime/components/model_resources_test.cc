@@ -272,6 +272,14 @@ TEST(ModelTypeConversionTest, StringToModelType) {
   ASSERT_OK(result);
   EXPECT_EQ(result.value(), ModelType::kTfLiteMtpDrafter);
 
+  result = StringToModelType("tf_lite_text_encoder");
+  ASSERT_OK(result);
+  EXPECT_EQ(result.value(), ModelType::kTfLiteTextEncoder);
+
+  result = StringToModelType("TF_LITE_TEXT_ENCODER");
+  ASSERT_OK(result);
+  EXPECT_EQ(result.value(), ModelType::kTfLiteTextEncoder);
+
   result = StringToModelType("unknown");
   EXPECT_FALSE(result.ok());
 }
@@ -286,6 +294,8 @@ TEST(ModelTypeConversionTest, ModelTypeToString) {
             "TF_LITE_ARTISAN_TEXT_DECODER");
   EXPECT_EQ(ModelTypeToString(ModelType::kTfLiteMtpDrafter),
             "TF_LITE_MTP_DRAFTER");
+  EXPECT_EQ(ModelTypeToString(ModelType::kTfLiteTextEncoder),
+            "TF_LITE_TEXT_ENCODER");
   EXPECT_EQ(ModelTypeToString(ModelType::kUnknown), "UNKNOWN");
 }
 

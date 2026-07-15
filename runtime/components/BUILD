@@ -287,7 +287,6 @@ cc_library(
     deps = [
         ":model_resources",
         "@com_google_absl//absl/container:flat_hash_map",
-        "@com_google_absl//absl/log:absl_check",
         "@com_google_absl//absl/log:absl_log",
         "@com_google_absl//absl/memory",
         "@com_google_absl//absl/status",
@@ -298,6 +297,7 @@ cc_library(
         "@litert//litert/cc:litert_macros",
         "@litert//litert/cc:litert_model",
         "@litert//support/tokenizer",
+        "//runtime/proto:embedding_metadata_cc_proto",
         "//runtime/proto:llm_metadata_cc_proto",
         "//runtime/util:litert_lm_loader",
         "//runtime/util:litert_status_util",
@@ -316,6 +316,7 @@ cc_library(
         "@com_google_absl//absl/strings:string_view",
         "@litert//litert/cc:litert_model",
         "@litert//support/tokenizer",
+        "//runtime/proto:embedding_metadata_cc_proto",
         "//runtime/proto:llm_metadata_cc_proto",
         "//runtime/util:scoped_file",
     ] + select({

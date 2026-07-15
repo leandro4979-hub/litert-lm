@@ -38,6 +38,7 @@
 #include "litert/cc/litert_macros.h"  // from @litert
 #include "litert/cc/litert_model.h"  // from @litert
 #include "runtime/components/model_resources.h"
+#include "runtime/proto/embedding_metadata.pb.h"
 #include "runtime/util/litert_lm_loader.h"
 #include "runtime/util/scoped_file.h"
 #include "runtime/util/status_macros.h"  // NOLINT
@@ -203,6 +204,23 @@ ModelResourcesLitertLm::GetLlmMetadata() {
     llm_metadata_ = std::move(llm_metadata);
   }
   return llm_metadata_.get();
+};
+
+absl::StatusOr<const proto::EmbeddingMetadata*>
+ModelResourcesLitertLm::GetEmbeddingMetadata() {
+  if (embedding_metadata_ == nullptr) {
+    auto buffer_ref = litert_lm_loader_->GetEmbeddingMetadata();
+    if (!buffer_ref.has_value()) {
+      return absl::NotFoundError("No EmbeddingMetadata found in the model.");
+    }
+    auto embedding_metadata = std::make_unique<proto::EmbeddingMetadata>();
+    if (!embedding_metadata->ParseFromString(
+            std::string(buffer_ref->StrView()))) {  // NOLINT
+      return absl::InternalError("Failed to parse EmbeddingMetadata");
+    }
+    embedding_metadata_ = std::move(embedding_metadata);
+  }
+  return embedding_metadata_.get();
 };
 
 absl::StatusOr<std::reference_wrapper<ScopedFile>>

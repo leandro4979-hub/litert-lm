@@ -37,6 +37,7 @@
 #include "support/tokenizer/sentencepiece_tokenizer.h"  // from @litert
 #endif  // ENABLE_SENTENCEPIECE_TOKENIZER
 #include "support/tokenizer/tokenizer.h"  // from @litert
+#include "runtime/proto/embedding_metadata.pb.h"
 #include "runtime/proto/llm_metadata.pb.h"
 #include "runtime/util/scoped_file.h"
 
@@ -68,6 +69,7 @@ enum class ModelType {
   kArtisanTextDecoder = 11,  // The text decoder model for the artisan gpu.
   kTfLiteMtpDrafter = 13,    // The MTP drafter model.
   kTfLiteMtpAux = 14,        // The MTP auxiliary model.
+  kTfLiteTextEncoder = 15,   // The text encoder for an embedding model.
 };
 
 // Utility function to convert a string to ModelType. It's case insensitive.
@@ -103,6 +105,8 @@ inline absl::StatusOr<ModelType> StringToModelType(
     return ModelType::kTfLiteMtpDrafter;
   } else if (lower_case_model_type_str == "tf_lite_mtp_aux") {
     return ModelType::kTfLiteMtpAux;
+  } else if (lower_case_model_type_str == "tf_lite_text_encoder") {
+    return ModelType::kTfLiteTextEncoder;
   } else {
     return absl::InvalidArgumentError(
         absl::StrCat("Unknown model type: ", model_type_str));
@@ -140,6 +144,8 @@ inline std::string ModelTypeToString(ModelType model_type) {
       return "TF_LITE_MTP_DRAFTER";
     case ModelType::kTfLiteMtpAux:
       return "TF_LITE_MTP_AUX";
+    case ModelType::kTfLiteTextEncoder:
+      return "TF_LITE_TEXT_ENCODER";
     case ModelType::kUnknown:
       return "UNKNOWN";
     default:
@@ -210,6 +216,12 @@ class ModelResources {
 
   // Returns the llm metadata.
   virtual absl::StatusOr<const proto::LlmMetadata*> GetLlmMetadata() = 0;
+
+  // Returns the embedding metadata.
+  virtual absl::StatusOr<const proto::EmbeddingMetadata*>
+  GetEmbeddingMetadata() {
+    return absl::UnimplementedError("GetEmbeddingMetadata is not implemented.");
+  }
 };
 
 }  // namespace litert::lm

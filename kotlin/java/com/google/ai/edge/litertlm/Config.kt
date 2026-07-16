@@ -220,6 +220,8 @@ data class EngineConfig(
  * @property maxOutputToken The maximum number of output tokens per decode step. When `null`, use
  *   the default value from the model or the engine.
  * @property thinkingConfig Configuration for thinking/reasoning generation.
+ * @property enableResponseFormat Whether to enable response format (constrained decoding). If true,
+ *   initializes the constraint provider LLGuidance.
  */
 data class ConversationConfig
 @JvmOverloads
@@ -235,6 +237,7 @@ constructor(
   val prefillPrefaceOnInit: Boolean = false,
   val maxOutputToken: Int? = null,
   val thinkingConfig: ThinkingConfig? = null,
+  val enableResponseFormat: Boolean = false,
 ) {
   init {
     require(maxOutputToken == null || maxOutputToken > 0) {

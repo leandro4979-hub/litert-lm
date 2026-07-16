@@ -249,6 +249,7 @@ internal object LiteRtLmJni {
    *   default.
    * @param repetitionPenaltyConfig Configuration for repetition penalty.
    * @param noRepeatNgramConfig Configuration for no repeat ngram.
+   * @param suppressTokensConfig Configuration for suppressing specific tokens.
    * @param maxOutputToken The maximum number of output tokens. When non-positive, use the default.
    * @param thinkingConfig Configuration for thinking/reasoning generation.
    */
@@ -260,6 +261,7 @@ internal object LiteRtLmJni {
     visualTokenBudget: Int?,
     repetitionPenaltyConfig: RepetitionPenaltyConfig?,
     noRepeatNgramConfig: NoRepeatNgramConfig?,
+    suppressTokensConfig: SuppressTokensConfig?,
     maxOutputToken: Int,
     thinkingConfig: ThinkingConfig?,
   )
@@ -275,6 +277,7 @@ internal object LiteRtLmJni {
    *   default.
    * @param repetitionPenaltyConfig Configuration for repetition penalty.
    * @param noRepeatNgramConfig Configuration for no repeat ngram.
+   * @param suppressTokensConfig Configuration for suppressing specific tokens.
    * @param maxOutputToken The maximum number of output tokens. When non-positive, use the default.
    * @param thinkingConfig Configuration for thinking/reasoning generation.
    * @return The response message in JSON string format.
@@ -286,6 +289,7 @@ internal object LiteRtLmJni {
     visualTokenBudget: Int?,
     repetitionPenaltyConfig: RepetitionPenaltyConfig?,
     noRepeatNgramConfig: NoRepeatNgramConfig?,
+    suppressTokensConfig: SuppressTokensConfig?,
     maxOutputToken: Int,
     thinkingConfig: ThinkingConfig?,
   ): String

@@ -111,6 +111,16 @@ constructor(val noRepeatNgramSize: Int? = null, val windowSize: Int? = null) {
 }
 
 /**
+ * Configuration for suppressing specific tokens during decoding.
+ *
+ * @property suppressTokens A list of token IDs to suppress. Banned tokens will have their logit set
+ *   to -inf.
+ */
+data class SuppressTokensConfig(val suppressTokens: Collection<Int>) {
+  internal fun getSuppressTokensArray(): IntArray = suppressTokens.toIntArray()
+}
+
+/**
  * Configuration for thinking/reasoning generation.
  *
  * @property enableThinking Whether thinking/reasoning generation is enabled.

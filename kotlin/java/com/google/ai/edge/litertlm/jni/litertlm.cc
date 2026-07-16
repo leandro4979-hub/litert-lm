@@ -22,6 +22,7 @@
 #include <variant>
 #include <vector>
 
+#include "absl/container/flat_hash_set.h"  // from @com_google_absl
 #include "absl/functional/any_invocable.h"  // from @com_google_absl
 #include "absl/log/absl_log.h"  // from @com_google_absl
 #include "absl/status/status.h"  // from @com_google_absl
@@ -32,6 +33,7 @@
 #include "litert/cc/internal/scoped_file.h"  // from @litert
 #include "runtime/components/logits_processor/no_repeat_ngram_config.h"
 #include "runtime/components/logits_processor/repetition_penalty_config.h"
+#include "runtime/components/logits_processor/suppress_tokens_config.h"
 #include "runtime/components/prompt_template.h"
 #include "runtime/conversation/conversation.h"
 #include "runtime/conversation/io_types.h"
@@ -423,6 +425,29 @@ litert::lm::NoRepeatNgramConfig CreateNoRepeatNgramConfigFromJni(
           : default_config.no_repeat_ngram_size(),
       window_size_opt.has_value() ? *window_size_opt
                                   : default_config.window_size());
+}
+
+litert::lm::SuppressTokensConfig CreateSuppressTokensConfigFromJni(
+    JNIEnv* env, jobject suppress_tokens_config_obj) {
+  jclass cls = env->GetObjectClass(suppress_tokens_config_obj);
+  jmethodID get_array_mid =
+      env->GetMethodID(cls, "getSuppressTokensArray", "()[I");
+  jintArray array_obj = (jintArray)env->CallObjectMethod(
+      suppress_tokens_config_obj, get_array_mid);
+
+  absl::flat_hash_set<int> suppress_tokens;
+  if (array_obj != nullptr) {
+    jsize size = env->GetArrayLength(array_obj);
+    jint* elements = env->GetIntArrayElements(array_obj, nullptr);
+    for (int i = 0; i < size; ++i) {
+      suppress_tokens.insert(elements[i]);
+    }
+    env->ReleaseIntArrayElements(array_obj, elements, JNI_ABORT);
+    env->DeleteLocalRef(array_obj);
+  }
+  env->DeleteLocalRef(cls);
+
+  return litert::lm::SuppressTokensConfig(std::move(suppress_tokens));
 }
 
 nlohmann::ordered_json GetExtraContextJson(JNIEnv* env,
@@ -1164,8 +1189,8 @@ LITERTLM_JNIEXPORT void JNICALL JNI_METHOD(nativeSendMessageAsync)(
     JNIEnv* env, jclass thiz, jlong conversation_pointer,
     jstring messageJSONString, jstring extraContextJsonString, jobject callback,
     jobject visual_token_budget, jobject repetition_penalty_config_obj,
-    jobject no_repeat_ngram_config_obj, jint max_output_token,
-    jobject thinking_config_obj) {
+    jobject no_repeat_ngram_config_obj, jobject suppress_tokens_config_obj,
+    jint max_output_token, jobject thinking_config_obj) {
   JavaVM* jvm = nullptr;
   if (env->GetJavaVM(&jvm) != JNI_OK) {
     ThrowLiteRtLmJniException(env, "Failed to get JavaVM");
@@ -1200,6 +1225,11 @@ LITERTLM_JNIEXPORT void JNICALL JNI_METHOD(nativeSendMessageAsync)(
   if (no_repeat_ngram_config_obj != nullptr) {
     optional_args.no_repeat_ngram_config =
         CreateNoRepeatNgramConfigFromJni(env, no_repeat_ngram_config_obj);
+  }
+
+  if (suppress_tokens_config_obj != nullptr) {
+    optional_args.suppress_tokens_config =
+        CreateSuppressTokensConfigFromJni(env, suppress_tokens_config_obj);
   }
 
   if (max_output_token > 0) {
@@ -1295,8 +1325,8 @@ LITERTLM_JNIEXPORT jstring JNICALL JNI_METHOD(nativeSendMessage)(
     JNIEnv* env, jclass thiz, jlong conversation_pointer,
     jstring messageJSONString, jstring extraContextJsonString,
     jobject visual_token_budget, jobject repetition_penalty_config_obj,
-    jobject no_repeat_ngram_config_obj, jint max_output_token,
-    jobject thinking_config_obj) {
+    jobject no_repeat_ngram_config_obj, jobject suppress_tokens_config_obj,
+    jint max_output_token, jobject thinking_config_obj) {
   Conversation* conversation =
       reinterpret_cast<Conversation*>(conversation_pointer);
 
@@ -1325,6 +1355,11 @@ LITERTLM_JNIEXPORT jstring JNICALL JNI_METHOD(nativeSendMessage)(
   if (no_repeat_ngram_config_obj != nullptr) {
     optional_args.no_repeat_ngram_config =
         CreateNoRepeatNgramConfigFromJni(env, no_repeat_ngram_config_obj);
+  }
+
+  if (suppress_tokens_config_obj != nullptr) {
+    optional_args.suppress_tokens_config =
+        CreateSuppressTokensConfigFromJni(env, suppress_tokens_config_obj);
   }
 
   if (max_output_token > 0) {

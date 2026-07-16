@@ -88,6 +88,8 @@ class Conversation(
    * @param message The message to send to the model.
    * @param extraContext Optional context used for prompt template rendering.
    * @param repetitionPenaltyConfig Optional configuration for repetition penalty.
+   * @param noRepeatNgramConfig Optional configuration for no repeat ngram.
+   * @param suppressTokensConfig Optional configuration for suppressing specific tokens.
    * @param maxOutputToken Optional override for the maximum number of output tokens per decode
    *   step.
    * @param thinkingConfig Optional configuration for thinking/reasoning generation.
@@ -102,6 +104,7 @@ class Conversation(
     extraContext: Map<String, Any> = emptyMap(),
     repetitionPenaltyConfig: RepetitionPenaltyConfig? = null,
     noRepeatNgramConfig: NoRepeatNgramConfig? = null,
+    suppressTokensConfig: SuppressTokensConfig? = null,
     maxOutputToken: Int? = null,
     thinkingConfig: ThinkingConfig? = null,
   ): Message {
@@ -120,6 +123,7 @@ class Conversation(
           visualTokenBudget,
           repetitionPenaltyConfig,
           noRepeatNgramConfig,
+          suppressTokensConfig,
           maxOutputToken ?: -1,
           if (i == 0) thinkingConfig else null,
         )
@@ -151,6 +155,8 @@ class Conversation(
    * @param contents The list of contents to send to the model.
    * @param extraContext Optional context used for prompt template rendering.
    * @param repetitionPenaltyConfig Optional configuration for repetition penalty.
+   * @param noRepeatNgramConfig Optional configuration for no repeat ngram.
+   * @param suppressTokensConfig Optional configuration for suppressing specific tokens.
    * @param maxOutputToken Optional override for the maximum number of output tokens per decode
    *   step.
    * @param thinkingConfig Optional configuration for thinking/reasoning generation.
@@ -165,6 +171,7 @@ class Conversation(
     extraContext: Map<String, Any> = emptyMap(),
     repetitionPenaltyConfig: RepetitionPenaltyConfig? = null,
     noRepeatNgramConfig: NoRepeatNgramConfig? = null,
+    suppressTokensConfig: SuppressTokensConfig? = null,
     maxOutputToken: Int? = null,
     thinkingConfig: ThinkingConfig? = null,
   ): Message {
@@ -173,6 +180,7 @@ class Conversation(
       extraContext,
       repetitionPenaltyConfig,
       noRepeatNgramConfig,
+      suppressTokensConfig,
       maxOutputToken,
       thinkingConfig,
     )
@@ -189,6 +197,8 @@ class Conversation(
    * @param text The text to send to the model.
    * @param extraContext Optional context used for prompt template rendering.
    * @param repetitionPenaltyConfig Optional configuration for repetition penalty.
+   * @param noRepeatNgramConfig Optional configuration for no repeat ngram.
+   * @param suppressTokensConfig Optional configuration for suppressing specific tokens.
    * @param maxOutputToken Optional override for the maximum number of output tokens per decode
    *   step.
    * @param thinkingConfig Optional configuration for thinking/reasoning generation.
@@ -203,6 +213,7 @@ class Conversation(
     extraContext: Map<String, Any> = emptyMap(),
     repetitionPenaltyConfig: RepetitionPenaltyConfig? = null,
     noRepeatNgramConfig: NoRepeatNgramConfig? = null,
+    suppressTokensConfig: SuppressTokensConfig? = null,
     maxOutputToken: Int? = null,
     thinkingConfig: ThinkingConfig? = null,
   ): Message =
@@ -211,6 +222,7 @@ class Conversation(
       extraContext,
       repetitionPenaltyConfig,
       noRepeatNgramConfig,
+      suppressTokensConfig,
       maxOutputToken,
       thinkingConfig,
     )
@@ -228,6 +240,7 @@ class Conversation(
    * @param extraContext Optional context used for prompt template rendering.
    * @param repetitionPenaltyConfig Optional configuration for repetition penalty.
    * @param noRepeatNgramConfig Optional configuration for no repeat ngram.
+   * @param suppressTokensConfig Optional configuration for suppressing specific tokens.
    * @param maxOutputToken Optional override for the maximum number of output tokens per decode
    *   step.
    * @param thinkingConfig Optional configuration for thinking/reasoning generation.
@@ -241,6 +254,7 @@ class Conversation(
     extraContext: Map<String, Any> = emptyMap(),
     repetitionPenaltyConfig: RepetitionPenaltyConfig? = null,
     noRepeatNgramConfig: NoRepeatNgramConfig? = null,
+    suppressTokensConfig: SuppressTokensConfig? = null,
     maxOutputToken: Int? = null,
     thinkingConfig: ThinkingConfig? = null,
   ) {
@@ -250,7 +264,13 @@ class Conversation(
     val visualTokenBudget = @OptIn(ExperimentalApi::class) ExperimentalFlags.visualTokenBudget
 
     val jniCallback =
-      JniMessageCallbackImpl(callback, repetitionPenaltyConfig, noRepeatNgramConfig, maxOutputToken)
+      JniMessageCallbackImpl(
+        callback,
+        repetitionPenaltyConfig,
+        noRepeatNgramConfig,
+        suppressTokensConfig,
+        maxOutputToken,
+      )
     LiteRtLmJni.nativeSendMessageAsync(
       handle,
       message.toJson().toString(),
@@ -259,6 +279,7 @@ class Conversation(
       visualTokenBudget,
       repetitionPenaltyConfig,
       noRepeatNgramConfig,
+      suppressTokensConfig,
       maxOutputToken ?: -1,
       thinkingConfig,
     )
@@ -276,6 +297,8 @@ class Conversation(
    * @param callback The callback to receive the streaming responses.
    * @param extraContext Optional context used for prompt template rendering.
    * @param repetitionPenaltyConfig Optional configuration for repetition penalty.
+   * @param noRepeatNgramConfig Optional configuration for no repeat ngram.
+   * @param suppressTokensConfig Optional configuration for suppressing specific tokens.
    * @param maxOutputToken Optional override for the maximum number of output tokens per decode
    *   step.
    * @param thinkingConfig Optional configuration for thinking/reasoning generation.
@@ -289,6 +312,7 @@ class Conversation(
     extraContext: Map<String, Any> = emptyMap(),
     repetitionPenaltyConfig: RepetitionPenaltyConfig? = null,
     noRepeatNgramConfig: NoRepeatNgramConfig? = null,
+    suppressTokensConfig: SuppressTokensConfig? = null,
     maxOutputToken: Int? = null,
     thinkingConfig: ThinkingConfig? = null,
   ) =
@@ -298,6 +322,7 @@ class Conversation(
       extraContext,
       repetitionPenaltyConfig,
       noRepeatNgramConfig,
+      suppressTokensConfig,
       maxOutputToken,
       thinkingConfig,
     )
@@ -314,6 +339,8 @@ class Conversation(
    * @param callback The callback to receive the streaming responses.
    * @param extraContext Optional context used for prompt template rendering.
    * @param repetitionPenaltyConfig Optional configuration for repetition penalty.
+   * @param noRepeatNgramConfig Optional configuration for no repeat ngram.
+   * @param suppressTokensConfig Optional configuration for suppressing specific tokens.
    * @param maxOutputToken Optional override for the maximum number of output tokens per decode
    *   step.
    * @param thinkingConfig Optional configuration for thinking/reasoning generation.
@@ -327,6 +354,7 @@ class Conversation(
     extraContext: Map<String, Any> = emptyMap(),
     repetitionPenaltyConfig: RepetitionPenaltyConfig? = null,
     noRepeatNgramConfig: NoRepeatNgramConfig? = null,
+    suppressTokensConfig: SuppressTokensConfig? = null,
     maxOutputToken: Int? = null,
     thinkingConfig: ThinkingConfig? = null,
   ) =
@@ -336,6 +364,7 @@ class Conversation(
       extraContext,
       repetitionPenaltyConfig,
       noRepeatNgramConfig,
+      suppressTokensConfig,
       maxOutputToken,
       thinkingConfig,
     )
@@ -351,6 +380,8 @@ class Conversation(
    * @param message The message to send to the model.
    * @param extraContext Optional context used for prompt template rendering.
    * @param repetitionPenaltyConfig Optional configuration for repetition penalty.
+   * @param noRepeatNgramConfig Optional configuration for no repeat ngram.
+   * @param suppressTokensConfig Optional configuration for suppressing specific tokens.
    * @param maxOutputToken Optional override for the maximum number of output tokens per decode
    *   step.
    * @param thinkingConfig Optional configuration for thinking/reasoning generation.
@@ -364,6 +395,7 @@ class Conversation(
     extraContext: Map<String, Any> = emptyMap(),
     repetitionPenaltyConfig: RepetitionPenaltyConfig? = null,
     noRepeatNgramConfig: NoRepeatNgramConfig? = null,
+    suppressTokensConfig: SuppressTokensConfig? = null,
     maxOutputToken: Int? = null,
     thinkingConfig: ThinkingConfig? = null,
   ): Flow<Message> = callbackFlow {
@@ -385,6 +417,7 @@ class Conversation(
       extraContext,
       repetitionPenaltyConfig,
       noRepeatNgramConfig,
+      suppressTokensConfig,
       maxOutputToken,
       thinkingConfig,
     )
@@ -402,6 +435,8 @@ class Conversation(
    * @param contents The list of contents to send to the model.
    * @param extraContext Optional context used for prompt template rendering.
    * @param repetitionPenaltyConfig Optional configuration for repetition penalty.
+   * @param noRepeatNgramConfig Optional configuration for no repeat ngram.
+   * @param suppressTokensConfig Optional configuration for suppressing specific tokens.
    * @param maxOutputToken Optional override for the maximum number of output tokens per decode
    *   step.
    * @param thinkingConfig Optional configuration for thinking/reasoning generation.
@@ -415,6 +450,7 @@ class Conversation(
     extraContext: Map<String, Any> = emptyMap(),
     repetitionPenaltyConfig: RepetitionPenaltyConfig? = null,
     noRepeatNgramConfig: NoRepeatNgramConfig? = null,
+    suppressTokensConfig: SuppressTokensConfig? = null,
     maxOutputToken: Int? = null,
     thinkingConfig: ThinkingConfig? = null,
   ): Flow<Message> =
@@ -423,6 +459,7 @@ class Conversation(
       extraContext,
       repetitionPenaltyConfig,
       noRepeatNgramConfig,
+      suppressTokensConfig,
       maxOutputToken,
       thinkingConfig,
     )
@@ -438,6 +475,8 @@ class Conversation(
    * @param text The text to send to the model.
    * @param extraContext Optional context used for prompt template rendering.
    * @param repetitionPenaltyConfig Optional configuration for repetition penalty.
+   * @param noRepeatNgramConfig Optional configuration for no repeat ngram.
+   * @param suppressTokensConfig Optional configuration for suppressing specific tokens.
    * @param maxOutputToken Optional override for the maximum number of output tokens per decode
    *   step.
    * @param thinkingConfig Optional configuration for thinking/reasoning generation.
@@ -451,6 +490,7 @@ class Conversation(
     extraContext: Map<String, Any> = emptyMap(),
     repetitionPenaltyConfig: RepetitionPenaltyConfig? = null,
     noRepeatNgramConfig: NoRepeatNgramConfig? = null,
+    suppressTokensConfig: SuppressTokensConfig? = null,
     maxOutputToken: Int? = null,
     thinkingConfig: ThinkingConfig? = null,
   ): Flow<Message> =
@@ -459,6 +499,7 @@ class Conversation(
       extraContext,
       repetitionPenaltyConfig,
       noRepeatNgramConfig,
+      suppressTokensConfig,
       maxOutputToken,
       thinkingConfig,
     )
@@ -495,6 +536,7 @@ class Conversation(
     private val callback: MessageCallback,
     private val repetitionPenaltyConfig: RepetitionPenaltyConfig? = null,
     private val noRepeatNgramConfig: NoRepeatNgramConfig? = null,
+    private val suppressTokensConfig: SuppressTokensConfig? = null,
     private val maxOutputToken: Int? = null,
   ) : LiteRtLmJni.JniMessageCallback {
 
@@ -537,6 +579,7 @@ class Conversation(
           @OptIn(ExperimentalApi::class) ExperimentalFlags.visualTokenBudget,
           repetitionPenaltyConfig,
           noRepeatNgramConfig,
+          suppressTokensConfig,
           maxOutputToken ?: -1,
           null,
         )

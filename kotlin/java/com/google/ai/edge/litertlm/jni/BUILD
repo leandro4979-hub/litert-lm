@@ -26,6 +26,7 @@ cc_binary(
     deps = [
         "@com_google_absl//absl/base:log_severity",
         "@com_google_absl//absl/container:flat_hash_map",
+        "@com_google_absl//absl/container:flat_hash_set",
         "@com_google_absl//absl/functional:any_invocable",
         "@com_google_absl//absl/log:absl_log",
         "@com_google_absl//absl/log:globals",
@@ -40,6 +41,7 @@ cc_binary(
         "//runtime/components:prompt_template",
         "//runtime/components/logits_processor:no_repeat_ngram_config",
         "//runtime/components/logits_processor:repetition_penalty_config",
+        "//runtime/components/logits_processor:suppress_tokens_config",
         "//runtime/conversation",
         "//runtime/conversation:io_types",
         "//runtime/conversation:thinking_config",

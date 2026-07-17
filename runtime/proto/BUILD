@@ -147,3 +147,47 @@ alias(
     name = "litert_lm_metrics_py_pb2",
     actual = ":litert_lm_metrics_py_proto",
 )
+
+tf_proto_library(
+    name = "embedding_model_type",
+    srcs = ["embedding_model_type.proto"],
+    deps = [":token_proto"],
+)
+
+alias(
+    name = "embedding_model_type_proto",
+    actual = ":embedding_model_type",
+)
+
+alias(
+    name = "embedding_model_type_cc_proto",
+    actual = ":embedding_model_type_cc",
+)
+
+alias(
+    name = "embedding_model_type_py_pb2",
+    actual = ":embedding_model_type_py_proto",
+)
+
+tf_proto_library(
+    name = "embedding_metadata",
+    srcs = ["embedding_metadata.proto"],
+    deps = [
+        ":embedding_model_type_proto",
+    ],
+)
+
+alias(
+    name = "embedding_metadata_proto",
+    actual = ":embedding_metadata",
+)
+
+alias(
+    name = "embedding_metadata_cc_proto",
+    actual = ":embedding_metadata_cc",
+)
+
+alias(
+    name = "embedding_metadata_py_pb2",
+    actual = ":embedding_metadata_py_proto",
+)

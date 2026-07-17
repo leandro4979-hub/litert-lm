@@ -363,6 +363,7 @@ class LlmLiteRtNpuCompiledModelExecutor : public LlmExecutor {
           SpeculativeDecodingType::kNone,
       std::optional<DrafterContext> drafter_context = std::nullopt,
       std::optional<DrafterAuxContext> drafter_aux_context = std::nullopt,
+      bool has_sliding_window_attention = false,
       const litert::Model* embedder_per_layer_model = nullptr)
       : executor_settings_(std::move(executor_settings)),
         env_(llm_env),
@@ -374,6 +375,7 @@ class LlmLiteRtNpuCompiledModelExecutor : public LlmExecutor {
         embedding_lookup_manager_(std::move(embedding_lookup_manager)),
         per_layer_embedding_lookup_manager_(
             std::move(per_layer_embedding_lookup_manager)),
+        embedder_per_layer_model_(embedder_per_layer_model),
         embedder_per_layer_context_(std::move(embedder_per_layer_context)),
         llm_inference_context_(std::move(llm_inference_context)),
         cache_update_inference_context_(
@@ -394,10 +396,10 @@ class LlmLiteRtNpuCompiledModelExecutor : public LlmExecutor {
         speculative_decoding_type_(speculative_decoding_type),
         drafter_context_(std::move(drafter_context)),
         drafter_aux_context_(std::move(drafter_aux_context)),
-        embedder_per_layer_model_(embedder_per_layer_model),
         per_tensor_logits_scale_(quantization_params.scale),
         per_tensor_logits_zero_point_(quantization_params.zero_point),
-        kv_cache_init_value_(kv_cache_init_value) {
+        kv_cache_init_value_(kv_cache_init_value),
+        has_sliding_window_attention_(has_sliding_window_attention) {
     auto npu_config_status = executor_settings_.GetBackendConfig<NpuConfig>();
     if (npu_config_status.ok()) {
       npu_config_ = *npu_config_status;
@@ -756,6 +758,7 @@ class LlmLiteRtNpuCompiledModelExecutor : public LlmExecutor {
   // processor state.
   bool ran_decode_ = false;
   int64_t kv_cache_init_value_ = 0;
+  bool has_sliding_window_attention_ = false;
 };
 
 std::ostream& operator<<(

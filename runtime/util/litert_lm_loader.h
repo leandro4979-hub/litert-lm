@@ -187,6 +187,13 @@ class LitertLmLoader {
         .value();
   }
 
+  // Returns the embedding metadata section buffer. If not found, returns
+  // std::nullopt.
+  std::optional<litert::BufferRef<uint8_t>> GetEmbeddingMetadata() {
+    return GetSectionBuffer(
+        BufferKey(schema::AnySectionDataType_EmbeddingMetadataProto));
+  }
+
   absl::StatusOr<std::pair<size_t, size_t>> GetSectionLocation(
       BufferKey buffer_key) const;
 

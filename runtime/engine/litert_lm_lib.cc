@@ -115,7 +115,7 @@ absl::StatusOr<ModelAssets> CreateModelAssets(
   if (settings.model_path.empty()) {
     return absl::InvalidArgumentError("Model path is empty.");
   }
-  ABSL_LOG(INFO) << "Model path: " << settings.model_path;
+  ABSL_VLOG(1) << "Model path: " << settings.model_path;
   if (!settings.load_model_from_descriptor) {
     return ModelAssets::Create(settings.model_path);
   }
@@ -171,7 +171,7 @@ absl::Status CheckExpectedOutput(const std::string& captured_output,
   // Skip printing the output when using fake prefill tokens.
   bool should_print_output = settings.benchmark_prefill_tokens == 0;
   if (should_print_output) {
-    ABSL_LOG(INFO) << "Captured model output: " << captured_output;
+    ABSL_VLOG(1) << "Captured model output: " << captured_output;
   }
   if (settings.expected_output.has_value()) {
     if (!absl::StrContainsIgnoreCase(captured_output,
@@ -205,6 +205,9 @@ absl::StatusOr<Message> RunSingleTurnConversation(
   if (settings.repetition_penalty_config.enabled()) {
     optional_args.repetition_penalty_config =
         settings.repetition_penalty_config;
+  }
+  if (settings.no_repeat_ngram_config.enabled()) {
+    optional_args.no_repeat_ngram_config = settings.no_repeat_ngram_config;
   }
   if (settings.suppress_tokens_config.enabled()) {
     optional_args.suppress_tokens_config = settings.suppress_tokens_config;
@@ -276,6 +279,9 @@ absl::Status RunMultiTurnConversation(const LiteRtLmSettings& settings,
       optional_args.repetition_penalty_config =
           settings.repetition_penalty_config;
     }
+    if (settings.no_repeat_ngram_config.enabled()) {
+      optional_args.no_repeat_ngram_config = settings.no_repeat_ngram_config;
+    }
     if (settings.suppress_tokens_config.enabled()) {
       optional_args.suppress_tokens_config = settings.suppress_tokens_config;
     }
@@ -319,7 +325,7 @@ absl::Status RunSingleTurnSession(const std::string& input_prompt,
         "Async mode is not supported for single turn session.");
   }
 
-  ABSL_LOG(INFO) << "Running single turn session with prompt: " << input_prompt;
+  ABSL_VLOG(1) << "Running single turn session with prompt: " << input_prompt;
   DecodeConfig decode_config = DecodeConfig::CreateDefault();
   if (settings.repetition_penalty_config.enabled()) {
     decode_config.SetRepetitionPenaltyConfig(
@@ -352,7 +358,7 @@ absl::Status RunSingleTurnSession(const std::string& input_prompt,
   for (const auto& response : responses.GetTexts()) {
     captured_output << response << std::endl << std::flush;
   }
-  ABSL_LOG(INFO) << "output: " << captured_output.str();
+  ABSL_VLOG(1) << "output: " << captured_output.str();
   ABSL_RETURN_IF_ERROR(CheckExpectedOutput(captured_output.str(), settings));
   return absl::OkStatus();
 }
@@ -373,7 +379,7 @@ absl::StatusOr<std::vector<litert::lm::ScorerOutput>> RunScoreText(
     ABSL_LOG(WARNING) << "No score found.";
   } else {
     // Multiply by -1 to get the negative log likelihood.
-    ABSL_LOG(INFO) << "Score: " << -1 * (scores[0]) << std::endl;
+    ABSL_VLOG(1) << "Score: " << -1 * (scores[0]) << std::endl;
   }
   if (scores.size() != target_text_vector.size()) {
     return absl::InternalError(absl::StrCat("Scores size ", scores.size(),
@@ -549,6 +555,7 @@ absl::StatusOr<EngineSettings> CreateEngineSettings(
     if (settings.num_cpu_threads > 0) {
       cpu_settings.number_of_threads = settings.num_cpu_threads;
     }
+    cpu_settings.enable_ynnpack = settings.enable_ynnpack;
     cpu_settings.prefill_chunk_size = settings.prefill_chunk_size;
     executor_settings.SetBackendConfig(cpu_settings);
   }
@@ -599,6 +606,7 @@ absl::StatusOr<EngineSettings> CreateEngineSettings(
           static_cast<uint32_t>(settings.num_logits_to_print_after_decode),
       .gpu_madvise_original_shared_tensors =
           settings.gpu_madvise_original_shared_tensors,
+      .gpu_enable_metal_residency_set = settings.gpu_enable_metal_residency_set,
       .is_benchmark = settings.benchmark,
       .preferred_device_substr = settings.preferred_device_substr,
       .num_threads_to_upload = settings.num_threads_to_upload,
@@ -649,6 +657,8 @@ absl::StatusOr<EngineSettings> CreateEngineSettings(
     benchmark_params.set_num_prefill_tokens(settings.benchmark_prefill_tokens);
     benchmark_params.set_num_decode_tokens(settings.benchmark_decode_tokens);
     engine_settings.GetMutableBenchmarkParams() = benchmark_params;
+    // Set the single threaded execution for benchmarking.
+    engine_settings.SetSingleThreadedExecution(true);
   }
 
   return engine_settings;

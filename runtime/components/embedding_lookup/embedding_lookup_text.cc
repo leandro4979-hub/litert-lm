@@ -120,10 +120,12 @@ absl::Status EmbeddingLookupText::LookupDecode(int token,
     }
   }
 
-  auto decode_output_lock_and_addr = ::litert::TensorBufferScopedLock::Create(
-      *decode_output, TensorBuffer::LockMode::kWrite);
+  LITERT_ASSIGN_OR_RETURN(
+      auto decode_output_lock_and_addr,
+      ::litert::TensorBufferScopedLock::Create(*decode_output,
+                                               TensorBuffer::LockMode::kWrite));
   auto decode_output_ptr =
-      reinterpret_cast<uint8_t*>(decode_output_lock_and_addr->second);
+      reinterpret_cast<uint8_t*>(decode_output_lock_and_addr.second);
 
   LITERT_ASSIGN_OR_RETURN(auto decode_output_size, decode_output->Size());
 
@@ -221,10 +223,12 @@ absl::Status EmbeddingLookupText::LookupPrefill(absl::Span<const int> tokens,
                      ". Output tensor bytes: ", prefill_output->Size()));
   }
 
-  auto prefill_output_lock_and_addr = ::litert::TensorBufferScopedLock::Create(
-      *prefill_output, TensorBuffer::LockMode::kWrite);
+  LITERT_ASSIGN_OR_RETURN(
+      auto prefill_output_lock_and_addr,
+      ::litert::TensorBufferScopedLock::Create(*prefill_output,
+                                               TensorBuffer::LockMode::kWrite));
   auto prefill_output_ptr =
-      reinterpret_cast<uint8_t*>(prefill_output_lock_and_addr->second);
+      reinterpret_cast<uint8_t*>(prefill_output_lock_and_addr.second);
 
   prefill_output_ptr += byte_offset;
   for (int token : tokens) {
@@ -311,7 +315,7 @@ absl::Status EmbeddingLookupText::Initialize() {
     signature_key_ = signatures.front().Key();
   }
 
-  ABSL_LOG(INFO) << "EmbeddingLookupText::Initialize Creating input buffers";
+  ABSL_VLOG(1) << "EmbeddingLookupText::Initialize Creating input buffers";
   LITERT_ASSIGN_OR_RETURN(input_buffers_, compiled_model_->CreateInputBuffers(
                                               signature_key_.value()));
 
@@ -350,10 +354,10 @@ absl::Status EmbeddingLookupText::Initialize() {
     floats_per_token_output_ *= output_buffer_layout.Dimensions()[i];
   }
 
-  ABSL_LOG(INFO) << "EmbeddingLookupText initialized: "
-                 << "signature=" << signature_key_.value_or("default")
-                 << ", rank=" << output_buffer_layout.Rank()
-                 << ", floats_per_token=" << floats_per_token_output_;
+  ABSL_VLOG(1) << "EmbeddingLookupText initialized: "
+               << "signature=" << signature_key_.value_or("default")
+               << ", rank=" << output_buffer_layout.Rank()
+               << ", floats_per_token=" << floats_per_token_output_;
 
   // Initialize the default embedding vector to be the embedding of token 0.
   default_embedding_vector_.resize(floats_per_token_output_);

@@ -113,6 +113,7 @@ enum AnySectionDataType:ubyte {
   TFLiteWeights,  // A external weight file for a tflite.Model. This is used
 // together with TFLiteModel section to form a complete
 // tflite.Model with weights.
+  EmbeddingMetadataProto,  // A litert.lm.proto.EmbeddingMetadata Protobuf.
 }
 
 // Section offsets and datatype

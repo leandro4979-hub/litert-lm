@@ -179,11 +179,13 @@ def run_interactive(
     backend: str | None = None,
     preset: str | None = None,
     prompt: str | None = None,
+    speculative_decoding: bool | None = None,
     enable_speculative_decoding: bool | None = None,
     no_template: bool = False,
+    chat_template: str | None = None,
     max_num_tokens: int | None = None,
     max_num_images: int | None = None,
-    filter_channel_content_from_kv_cache: bool = False,
+    filter_channel_content_from_kv_cache: bool | None = None,
     thinking: bool | None = None,
     thinking_budget: int | None = None,
     vision_backend: str | None = None,
@@ -198,6 +200,9 @@ def run_interactive(
     activation_data_type: litert_lm.ActivationDataType | None = None,
 ) -> None:
   """Runs the model interactively or with a single prompt."""
+  if speculative_decoding is None:
+    speculative_decoding = enable_speculative_decoding
+
   if not model_obj.exists():
     click.echo(
         click.style(
@@ -211,6 +216,20 @@ def run_interactive(
   state = SessionState()
 
   try:
+    speculative_decoding = model.resolve_config_option(
+        speculative_decoding, model_obj, "speculative_decoding"
+    )
+    max_num_tokens = model.resolve_config_option(
+        max_num_tokens, model_obj, "max_num_tokens"
+    )
+    cache = model.resolve_config_option(cache, model_obj, "cache")
+    top_k = model.resolve_config_option(top_k, model_obj, "top_k")
+    top_p = model.resolve_config_option(top_p, model_obj, "top_p")
+    temperature = model.resolve_config_option(
+        temperature, model_obj, "temperature"
+    )
+    seed = model.resolve_config_option(seed, model_obj, "seed")
+
     backend_val = model.parse_backend(
         backend, model_obj=model_obj, cpu_thread_count=cpu_thread_count
     )
@@ -262,7 +281,7 @@ def run_interactive(
       engine_cm = litert_lm.Engine(
           model_obj.model_path,
           backend=backend_val,
-          enable_speculative_decoding=enable_speculative_decoding,
+          enable_speculative_decoding=speculative_decoding,
           max_num_tokens=max_num_tokens,
           max_num_images=max_num_images,
           vision_backend=vision_backend_val,
@@ -308,6 +327,7 @@ def run_interactive(
             filter_channel_content_from_kv_cache=filter_channel_content_from_kv_cache,
             thinking_config=thinking_config,
             sampler_config=sampler_config,
+            chat_template=chat_template,
         )
 
       with runner_cm as runner:
@@ -405,6 +425,15 @@ def run_interactive(
     ),
 )
 @click.option(
+    "--chat-template",
+    type=click.Path(exists=True, dir_okay=False),
+    default=None,
+    help=(
+        "Path to a Jinja file to use as the chat template. If not set, use"
+        " the default provided by the model or the engine."
+    ),
+)
+@click.option(
     "--no-template",
     is_flag=True,
     default=False,
@@ -425,14 +454,20 @@ def run_interactive(
 )
 @click.option(
     "--filter-channel-content-from-kv-cache",
-    is_flag=True,
-    default=False,
+    is_flag=False,
+    flag_value="true",
+    type=click.Choice(["true", "false"], case_sensitive=False),
+    default=None,
+    callback=common.parse_bool_opt,
     help="Whether to filter channel content from the KV cache.",
 )
 @click.option(
-    "--thinking/--no-thinking",
-    is_flag=True,
+    "--thinking",
+    is_flag=False,
+    flag_value="true",
+    type=click.Choice(["true", "false"], case_sensitive=False),
     default=None,
+    callback=common.parse_bool_opt,
     help=(
         "Whether to enable thinking/reasoning generation. If set to true"
         " without specifying --thinking-budget, the budget defaults to -1"
@@ -519,13 +554,15 @@ def run(
     preset: str | None = None,
     backend: str | None = None,
     android: bool = False,
+    speculative_decoding: bool | None = None,
     enable_speculative_decoding: bool | None = None,
     verbose: bool = False,
     no_template: bool = False,
+    chat_template: str | None = None,
     from_huggingface_repo: str | None = None,
     huggingface_token: str | None = None,
     max_num_tokens: int | None = None,
-    filter_channel_content_from_kv_cache: bool = False,
+    filter_channel_content_from_kv_cache: bool | None = None,
     thinking: bool | None = None,
     thinking_budget: int | None = None,
     vision_backend: str | None = None,
@@ -550,11 +587,15 @@ def run(
       instructions.
     backend: The backend to use (cpu or gpu).
     android: Run on Android via ADB.
+    speculative_decoding: Speculative decoding mode (True, False, or None for
+      auto).
     enable_speculative_decoding: Speculative decoding mode (True, False, or None
       for auto).
     verbose: Whether to enable verbose logging.
     no_template: Interact with the model directly without applying prompt
       templates or stripping stop tokens.
+    chat_template: Path to a Jinja file to use as the chat template. If not set,
+      use the default provided by the model or the engine.
     from_huggingface_repo: The HuggingFace repository ID.
     huggingface_token: The HuggingFace API token.
     max_num_tokens: Maximum number of tokens for the KV cache.
@@ -574,6 +615,9 @@ def run(
     cpu_thread_count: The number of threads to use for CPU backend.
     activation_data_type: The activation data type to use for inference.
   """
+  if speculative_decoding is None:
+    speculative_decoding = enable_speculative_decoding
+
   if attachment and no_template:
     click.echo(
         click.style(
@@ -582,6 +626,20 @@ def run(
         )
     )
     return
+
+  if chat_template and no_template:
+    click.echo(
+        click.style(
+            "Error: --chat-template is not supported with --no-template.",
+            fg="red",
+        )
+    )
+    return
+
+  chat_template_content = None
+  if chat_template:
+    with open(chat_template, "r", encoding="utf-8") as f:
+      chat_template_content = f.read()
 
   expanded_attachments = []
   num_images = 0
@@ -662,8 +720,9 @@ def run(
       is_android=android,
       backend=backend,
       preset=preset,
-      enable_speculative_decoding=enable_speculative_decoding,
+      enable_speculative_decoding=speculative_decoding,
       no_template=no_template,
+      chat_template=chat_template_content,
       max_num_tokens=max_num_tokens,
       max_num_images=max_num_images,
       filter_channel_content_from_kv_cache=filter_channel_content_from_kv_cache,

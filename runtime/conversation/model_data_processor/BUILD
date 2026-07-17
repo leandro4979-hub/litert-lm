@@ -279,6 +279,7 @@ cc_library(
         "@litert//support/util:io_types",
         "//runtime/components:prompt_template",
         "//runtime/conversation:io_types",
+        "//runtime/conversation:prompt_utils",
         "//runtime/engine:io_types",
         "//runtime/util:litert_status_util",
     ],
@@ -289,6 +290,7 @@ cc_test(
     srcs = ["generic_data_processor_test.cc"],
     data = [
         "@litert//support/preprocessor/testdata",
+        "//runtime/components/testdata",
     ],
     deps = [
         ":generic_data_processor",

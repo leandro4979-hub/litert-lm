@@ -75,6 +75,8 @@ ABSL_FLAG(bool, multi_turns, false,
 ABSL_FLAG(int, num_cpu_threads, 0,
           "If greater than 0, the number of CPU threads to use for the LLM "
           "execution with CPU backend.");
+ABSL_FLAG(bool, enable_ynnpack, false,
+          "Delegate supported CPU operations to YNNPACK before XNNPACK.");
 ABSL_FLAG(bool, gpu_external_tensor_mode, false,
           "If false (by default), the GPU backend will use no external tensor "
           "mode which runs slightly faster during decode. It should be set "
@@ -194,3 +196,8 @@ ABSL_FLAG(
     "If true, disable the input prompt as a hint when creating the engine. "
     "This is useful to align the behavior of other languages with C++, where "
     "the input prompt is not used as a hint.");
+ABSL_FLAG(bool, gpu_enable_metal_residency_set, false,
+          "If true, enable metal residency set for GPU backend which prevents "
+          "model weigths from being swapped out from memory. Note that it will "
+          "increase the memory pressure for other applications and may cause "
+          "others' crash with out-of-memory failures.");

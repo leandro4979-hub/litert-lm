@@ -229,6 +229,10 @@ public actor Engine {
       conversationConfig.enableToolCallStreaming
         && ExperimentalFlags.enableConversationToolCallStreaming,
       ExperimentalFlags.conversationToolCallStreamingChannelName)
+    if let filterChannelContentFromKvCache = ExperimentalFlags.filterChannelContentFromKvCache {
+      litert_lm_conversation_config_set_filter_channel_content_from_kv_cache(
+        cConversationConfig, filterChannelContentFromKvCache)
+    }
 
     if let thinkingConfig = conversationConfig.thinkingConfig {
       guard let cThinkingConfig = litert_lm_thinking_config_create() else {
@@ -248,11 +252,15 @@ public actor Engine {
       throw LiteRTLMError.engine(.failedToCreateConversation)
     }
 
-    return Conversation(handle: conversationHandle, toolManager: toolManager)
+    return Conversation(
+      handle: conversationHandle,
+      toolManager: toolManager,
+      automaticToolCalling: conversationConfig.automaticToolCalling, engine: self)
   }
 
   deinit {
     if let handle = handle {
+      self.handle = nil
       litert_lm_engine_delete(handle)
     }
   }

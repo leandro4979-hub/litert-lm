@@ -134,6 +134,36 @@ constexpr absl::string_view kv_cache_slice_k_root_name = "kv_slice_k_";
 constexpr absl::string_view kv_cache_slice_v_root_name = "kv_slice_v_";
 constexpr absl::string_view kv_cache_slice_c_root_name = "kv_slice_c_";
 
+// Detect if the model uses Sliding Window Attention (SWA) by checking if
+// there are different KV cache sizes (mixed local/global attention).
+//
+// TODO(b/532090618): Remove this heuristic once the engine provides this via
+// metadata to the executor. I.e. new litertlm models will have this
+// information embedded and the engine passes it down.
+bool DetectIsSwa(const absl::flat_hash_map<absl::string_view, TensorBuffer>&
+                     input_kv_cache_buffers) {
+  std::set<int64_t> cache_seqs;
+  for (const auto& [name, buffer] : input_kv_cache_buffers) {
+    if (name.starts_with(kv_cache_k_root_name) ||
+        name.starts_with(kv_cache_v_root_name) ||
+        name.starts_with(kv_cache_c_root_name)) {
+      auto tensor_type_expected = buffer.TensorType();
+      if (tensor_type_expected.HasValue()) {
+        auto dims = tensor_type_expected->Layout().Dimensions();
+        int rank = dims.size();
+        if (rank >= 2) {
+          int last_dim = dims[rank - 1];
+          int second_last_dim = dims[rank - 2];
+          int64_t cache_seq = std::max(last_dim, second_last_dim);
+          cache_seqs.insert(cache_seq);
+        }
+      }
+    }
+  }
+  bool is_swa = cache_seqs.size() > 1;
+  return is_swa;
+}
+
 namespace {
 
 using LogitsQuantizationParams =
@@ -198,7 +228,21 @@ BuildResolvedPrefillSignatures(int prefill_size) {
 
 }  // namespace
 
-#define NPU_EXECUTOR_LOG(X) ABSL_LOG_IF(X, npu_config_.enable_npu_debug_logging)
+// On Windows, `ERROR` is defined as a macro, which can cause issues if it is
+// expanded prematurely where the literal token `ERROR` is expected.
+//
+// To work around this, we use token concatenation (`##`) to construct the
+// underlying macro name. Because `severity` is pasted (##), it is NOT expanded
+// to its macro value first. For example, `NPU_EXECUTOR_LOG(ERROR)` simply
+// pastes `NPU_EXECUTOR_LOG_` and `ERROR` to form `NPU_EXECUTOR_LOG_ERROR`,
+// which then safely expands to `ABSL_LOG_IF(ERROR, ...)`.
+#define NPU_EXECUTOR_LOG_INFO \
+  ABSL_LOG_IF(INFO, npu_config_.enable_npu_debug_logging)
+#define NPU_EXECUTOR_LOG_ERROR \
+  ABSL_LOG_IF(ERROR, npu_config_.enable_npu_debug_logging)
+#define NPU_EXECUTOR_LOG_WARNING \
+  ABSL_LOG_IF(WARNING, npu_config_.enable_npu_debug_logging)
+#define NPU_EXECUTOR_LOG(severity) NPU_EXECUTOR_LOG_##severity
 
 // Signature names for the embedder.
 struct EmbedderSignatures {
@@ -590,7 +634,7 @@ LlmLiteRtNpuCompiledModelExecutor::CreateLiteRtCpuOptions(
 }
 
 LlmLiteRtNpuCompiledModelExecutor::~LlmLiteRtNpuCompiledModelExecutor() {
-  ABSL_LOG(INFO) << "LatencyStats: " << GetLatencyStats();
+  ABSL_VLOG(1) << "LatencyStats: " << GetLatencyStats();
 }
 
 absl::StatusOr<LlmLiteRtNpuCompiledModelExecutor::EmbedderContext>
@@ -1600,7 +1644,6 @@ absl::Status LlmLiteRtNpuCompiledModelExecutor::WarmupInference(
   return absl::OkStatus();
 }
 
-
 absl::Status LlmLiteRtNpuCompiledModelExecutor::WarmupDrafterInference(
     const DrafterContext& drafter_context,
     const DrafterAuxContext& drafter_aux_context) {
@@ -2577,7 +2620,7 @@ absl::Status LlmLiteRtNpuCompiledModelExecutor::PrefillCommonPipeline(
       ABSL_RETURN_IF_ERROR(HWKVCacheUpdate(
           cache_update_inference_context_.prefill_input_buffers,
           cache_update_inference_context_.prefill_output_buffers,
-          kv_quant_params_));
+          kv_quant_params_, has_sliding_window_attention_));
     } else {
       auto res = npu_auxiliary_context_.npu_auxiliary_compiled_model.Run(
           prefill_signatures_.cache_update,
@@ -2801,7 +2844,7 @@ absl::Status LlmLiteRtNpuCompiledModelExecutor::DecodeInternal(
       ABSL_RETURN_IF_ERROR(
           HWKVCacheUpdate(cache_update_inference_context_.decode_input_buffers,
                           cache_update_inference_context_.decode_output_buffers,
-                          kv_quant_params_));
+                          kv_quant_params_, has_sliding_window_attention_));
     } else {
       auto res = npu_auxiliary_context_.npu_auxiliary_compiled_model.Run(
           CacheUpdateSignatures::kDecodeCacheUpdate,
@@ -2997,42 +3040,11 @@ LlmLiteRtNpuCompiledModelExecutor::RunDrafterLoop(int start_step,
 }
 
 namespace {
-// Helper to sample from a batch of logits at a specific index.
-absl::StatusOr<int> GetLogitsAtBatchIndex(const TensorBuffer& logits_buffer,
-                                          int batch_idx,
-                                          bool enable_neon_sampling) {
-  LITERT_ASSIGN_OR_RETURN(RankedTensorType tensor_type,
-                          logits_buffer.TensorType());
-  LITERT_ASSIGN_OR_RETURN(
-      auto lock_and_addr,
-      ::litert::TensorBufferScopedLock::Create(
-          logits_buffer, ::litert::TensorBuffer::LockMode::kRead));
-
-  if (tensor_type.Layout().Dimensions().size() < 3) {
-    return absl::InvalidArgumentError(
-        "Logits tensor must have at least 3 dimensions.");
-  }
-  const int vocab_size = tensor_type.Layout().Dimensions()[2];
-  if (vocab_size == 0) {
-    return absl::InvalidArgumentError("Vocab size cannot be 0.");
-  }
-  size_t element_size = 0;
-  switch (tensor_type.ElementType()) {
-    case ::litert::ElementType::Float32:
-      element_size = sizeof(float);
-      break;
-    case ::litert::ElementType::Int16:
-      element_size = sizeof(int16_t);
-      break;
-    case ::litert::ElementType::Int8:
-      element_size = sizeof(int8_t);
-      break;
-    default:
-      return absl::UnimplementedError(
-          "Unsupported logit type for element size.");
-  }
-
-  const uint8_t* base_ptr = static_cast<const uint8_t*>(lock_and_addr.second);
+// Helper to sample from a slice of logits pointer directly without
+// acquiring/releasing locks.
+absl::StatusOr<int> SampleLogitsSliceFromLockedPtr(
+    ::litert::ElementType element_type, const uint8_t* base_ptr, int batch_idx,
+    int vocab_size, size_t element_size, bool enable_neon_sampling) {
   const uint8_t* logits_ptr =
       base_ptr + (batch_idx * vocab_size * element_size);
 
@@ -3048,7 +3060,7 @@ absl::StatusOr<int> GetLogitsAtBatchIndex(const TensorBuffer& logits_buffer,
     return max_idx;
   };
 
-  if (tensor_type.ElementType() == ::litert::ElementType::Float32) {
+  if (element_type == ::litert::ElementType::Float32) {
 #if defined(__ANDROID__) && defined(__ARM_NEON)
     if (enable_neon_sampling) {
       return FindMaxIndexFloatNeon(reinterpret_cast<const float*>(logits_ptr),
@@ -3062,7 +3074,7 @@ absl::StatusOr<int> GetLogitsAtBatchIndex(const TensorBuffer& logits_buffer,
     }
 #endif
     return find_max_index_plain(reinterpret_cast<const float*>(logits_ptr));
-  } else if (tensor_type.ElementType() == ::litert::ElementType::Int16) {
+  } else if (element_type == ::litert::ElementType::Int16) {
 #if defined(__ANDROID__) && defined(__ARM_NEON)
     if (enable_neon_sampling) {
       return FindMaxIndexInt16Neon(reinterpret_cast<const int16_t*>(logits_ptr),
@@ -3076,7 +3088,7 @@ absl::StatusOr<int> GetLogitsAtBatchIndex(const TensorBuffer& logits_buffer,
     }
 #endif
     return find_max_index_plain(reinterpret_cast<const int16_t*>(logits_ptr));
-  } else if (tensor_type.ElementType() == ::litert::ElementType::Int8) {
+  } else if (element_type == ::litert::ElementType::Int8) {
 #if defined(__ANDROID__) && defined(__ARM_NEON)
     if (enable_neon_sampling) {
       return FindMaxIndexInt8Neon(reinterpret_cast<const int8_t*>(logits_ptr),
@@ -3245,13 +3257,47 @@ LlmLiteRtNpuCompiledModelExecutor::PerformRejectionSampling(
   int num_accepted = 0;
   int bonus_token_id = kInvalidTokenId;
 
+  LITERT_ASSIGN_OR_RETURN(RankedTensorType tensor_type,
+                          verifier_logits_buffer.TensorType());
+  if (tensor_type.Layout().Dimensions().size() < 3) {
+    return absl::InvalidArgumentError(
+        "Logits tensor must have at least 3 dimensions.");
+  }
+  const int vocab_size = tensor_type.Layout().Dimensions()[2];
+  if (vocab_size == 0) {
+    return absl::InvalidArgumentError("Vocab size cannot be 0.");
+  }
+  size_t element_size = 0;
+  switch (tensor_type.ElementType()) {
+    case ::litert::ElementType::Float32:
+      element_size = sizeof(float);
+      break;
+    case ::litert::ElementType::Int16:
+      element_size = sizeof(int16_t);
+      break;
+    case ::litert::ElementType::Int8:
+      element_size = sizeof(int8_t);
+      break;
+    default:
+      return absl::UnimplementedError(
+          "Unsupported logit type for element size.");
+  }
+
+  LITERT_ASSIGN_OR_RETURN(
+      auto lock_and_addr,
+      ::litert::TensorBufferScopedLock::Create(
+          verifier_logits_buffer, ::litert::TensorBuffer::LockMode::kRead));
+  const uint8_t* base_ptr = static_cast<const uint8_t*>(lock_and_addr.second);
+
   // Log all sampled tokens from the verifier for transparency.
   std::vector<int> all_verifier_sampled;
+  all_verifier_sampled.reserve(draft_tokens.size() + 1);
   for (int i = 0; i < draft_tokens.size() + 1; ++i) {
     LITERT_ASSIGN_OR_RETURN(
         int sampled_token,
-        GetLogitsAtBatchIndex(verifier_logits_buffer, i,
-                              npu_config_.enable_neon_for_npu_greedy_sampling));
+        SampleLogitsSliceFromLockedPtr(
+            tensor_type.ElementType(), base_ptr, i, vocab_size, element_size,
+            npu_config_.enable_neon_for_npu_greedy_sampling));
     all_verifier_sampled.push_back(sampled_token);
   }
   NPU_EXECUTOR_LOG(INFO) << "    [RS] Verifier Sampled Tokens: ["
@@ -3273,10 +3319,7 @@ LlmLiteRtNpuCompiledModelExecutor::PerformRejectionSampling(
   }
 
   if (num_accepted == draft_tokens.size()) {
-    LITERT_ASSIGN_OR_RETURN(
-        bonus_token_id,
-        GetLogitsAtBatchIndex(verifier_logits_buffer, num_accepted,
-                              npu_config_.enable_neon_for_npu_greedy_sampling));
+    bonus_token_id = all_verifier_sampled[num_accepted];
   }
   latency_stats_.mtp_num_draft_tokens += draft_tokens.size();
   latency_stats_.mtp_num_accepted_tokens += num_accepted;
@@ -3309,7 +3352,7 @@ absl::Status LlmLiteRtNpuCompiledModelExecutor::CommitVerifiedKVCache(
     ABSL_RETURN_IF_ERROR(
         HWKVCacheUpdate(cache_update_inference_context_.verify_input_buffers,
                         cache_update_inference_context_.verify_output_buffers,
-                        kv_quant_params_));
+                        kv_quant_params_, has_sliding_window_attention_));
   } else {
     LITERT_RETURN_IF_ERROR(
         npu_auxiliary_context_.npu_auxiliary_compiled_model.Run(
@@ -3884,6 +3927,8 @@ LlmLiteRtNpuCompiledModelExecutor::CreateForModelHasPerLayerEmbedding(
     }
   }
 
+  const bool has_sliding_window_attention = DetectIsSwa(input_kv_cache_buffers);
+
   ABSL_RETURN_IF_ERROR(WarmupInference(
       llm_compiled_model, llm_inference_context,
       npu_auxiliary_context.npu_auxiliary_compiled_model, prefill_signatures,
@@ -3903,7 +3948,8 @@ LlmLiteRtNpuCompiledModelExecutor::CreateForModelHasPerLayerEmbedding(
       output_type, ple_table_element_type, mul_scale, output_scale,
       final_zero_point, std::move(kv_quant_params), kv_cache_init_value,
       speculative_decoding_type, std::move(drafter_context),
-      std::move(drafter_aux_context), embedder_per_layer_model));
+      std::move(drafter_aux_context), has_sliding_window_attention,
+      embedder_per_layer_model));
   return executor;
 }
 
@@ -4122,6 +4168,8 @@ LlmLiteRtNpuCompiledModelExecutor::CreateForModelWithoutPerLayerEmbedding(
     }
   }
 
+  const bool has_sliding_window_attention = DetectIsSwa(input_kv_cache_buffers);
+
   ABSL_RETURN_IF_ERROR(WarmupInference(
       llm_compiled_model, llm_inference_context,
       npu_auxiliary_context.npu_auxiliary_compiled_model, prefill_signatures,
@@ -4139,7 +4187,7 @@ LlmLiteRtNpuCompiledModelExecutor::CreateForModelWithoutPerLayerEmbedding(
       {}, 0, 0, litert::ElementType::None, litert::ElementType::None, 1.0f,
       1.0f, 0, std::move(kv_quant_params), kv_cache_init_value,
       speculative_decoding_type, std::move(drafter_context),
-      std::move(drafter_aux_context)));
+      std::move(drafter_aux_context), has_sliding_window_attention));
   return executor;
 }
 

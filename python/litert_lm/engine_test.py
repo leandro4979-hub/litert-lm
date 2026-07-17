@@ -437,6 +437,23 @@ class EngineTest(LiteRtLmTestBase):
       text = "".join([c.get("text", "") for c in message.get("content", [])])
       self.assertLess(len(text), 10)
 
+  def test_create_conversation_with_chat_template(self):
+    tmpl = "{{ bos_token }}{% for m in messages %}{{ m.content }}{% endfor %}"
+    with (
+        self._create_engine() as engine,
+        engine.create_conversation(chat_template=tmpl) as conversation,
+    ):
+      self.assertEqual(conversation.chat_template, tmpl)
+
+  def test_create_conversation_with_filter_channel_content_from_kv_cache(self):
+    with (
+        self._create_engine() as engine,
+        engine.create_conversation(
+            filter_channel_content_from_kv_cache=True
+        ) as conversation,
+    ):
+      self.assertIsNotNone(conversation)
+
   def test_create_conversation_with_max_output_tokens_async(self):
     with (
         self._create_engine() as engine,
@@ -680,6 +697,68 @@ class EngineTest(LiteRtLmTestBase):
       text_pieces = self._extract_text(stream)
       self.assertNotEmpty(text_pieces)
 
+  def test_conversation_send_message_with_no_repeat_ngram_config(self):
+    no_repeat_ngram_config = litert_lm.NoRepeatNgramConfig(
+        no_repeat_ngram_size=3,
+        window_size=10,
+    )
+    with (
+        self._create_engine() as engine,
+        engine.create_conversation() as conversation,
+    ):
+      message = conversation.send_message(
+          "Hello world!",
+          no_repeat_ngram_config=no_repeat_ngram_config,
+      )
+      self.assertIn("role", message)
+      self.assertEqual(message["role"], "assistant")
+
+  def test_conversation_send_message_async_with_no_repeat_ngram_config(self):
+    no_repeat_ngram_config = litert_lm.NoRepeatNgramConfig(
+        no_repeat_ngram_size=3,
+        window_size=10,
+    )
+    with (
+        self._create_engine() as engine,
+        engine.create_conversation() as conversation,
+    ):
+      stream = conversation.send_message_async(
+          "Hello world!",
+          no_repeat_ngram_config=no_repeat_ngram_config,
+      )
+      text_pieces = self._extract_text(stream)
+      self.assertNotEmpty(text_pieces)
+
+  def test_conversation_send_message_with_suppress_tokens_config(self):
+    suppress_tokens_config = litert_lm.SuppressTokensConfig(
+        suppress_tokens=[1, 2, 3],
+    )
+    with (
+        self._create_engine() as engine,
+        engine.create_conversation() as conversation,
+    ):
+      message = conversation.send_message(
+          "Hello world!",
+          suppress_tokens_config=suppress_tokens_config,
+      )
+      self.assertIn("role", message)
+      self.assertEqual(message["role"], "assistant")
+
+  def test_conversation_send_message_async_with_suppress_tokens_config(self):
+    suppress_tokens_config = litert_lm.SuppressTokensConfig(
+        suppress_tokens=[1, 2, 3],
+    )
+    with (
+        self._create_engine() as engine,
+        engine.create_conversation() as conversation,
+    ):
+      stream = conversation.send_message_async(
+          "Hello world!",
+          suppress_tokens_config=suppress_tokens_config,
+      )
+      text_pieces = self._extract_text(stream)
+      self.assertNotEmpty(text_pieces)
+
   def test_conversation_send_message_with_max_output_tokens(self):
     with (
         self._create_engine() as engine,
@@ -711,6 +790,36 @@ class EngineTest(LiteRtLmTestBase):
           apply_prompt_template=apply_prompt_template
       ) as session:
         self.assertIsNotNone(session)
+
+  def test_response_format_validation(self):
+    with self.assertRaisesRegex(ValueError, "Invalid JSON schema string"):
+      litert_lm.ResponseFormat.json("{invalid_json: true")
+
+  def test_response_format_without_enabling(self):
+    with (
+        self._create_engine() as engine,
+        engine.create_conversation() as conversation,
+    ):
+      with self.assertRaisesRegex(
+          ValueError,
+          "response_format cannot be used unless enable_response_format=True",
+      ):
+        conversation.send_message(
+            "What is the capital of France?",
+            response_format=litert_lm.ResponseFormat.regex("[0-9]{3}"),
+        )
+
+      with self.assertRaisesRegex(
+          ValueError,
+          "response_format cannot be used unless enable_response_format=True",
+      ):
+        # We must iterate the generator to trigger the exception
+        next(
+            conversation.send_message_async(
+                "What is the capital of France?",
+                response_format=litert_lm.ResponseFormat.regex("[0-9]{3}"),
+            )
+        )
 
 
 class FunctionCallingTest(LiteRtLmTestBase):

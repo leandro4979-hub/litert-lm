@@ -278,6 +278,78 @@ TEST(LlmLiteRTCompiledModelExecutorUtilsTest,
   EXPECT_THAT(work_groups, ElementsAre(Pair("prefill_128", 100)));
 }
 
+TEST(LlmLiteRTCompiledModelExecutorUtilsTest,
+     GetOptimizedPrefillWorkGroups_CautiousUpgradeTopLevel) {
+  SortedPrefillSignatureMap prefill_runner_set = {
+      {512, "prefill_512"}, {128, "prefill_128"}, {32, "prefill_32"}};
+  // Remainder 256 >= 512/2 -> Upgrade to 512
+  ASSERT_OK_AND_ASSIGN(auto work_groups,
+                       GetOptimizedPrefillWorkGroups(prefill_runner_set, 768));
+  EXPECT_THAT(work_groups,
+              ElementsAre(Pair("prefill_512", 512), Pair("prefill_512", 256)));
+}
+
+TEST(LlmLiteRTCompiledModelExecutorUtilsTest,
+     GetOptimizedPrefillWorkGroups_DeepCascadeUpgrade) {
+  SortedPrefillSignatureMap prefill_runner_set = {
+      {512, "prefill_512"}, {128, "prefill_128"}, {32, "prefill_32"}};
+  // Remainder 80 < 512/2, but 80 >= 128/2 -> Cascade and upgrade to 128
+  ASSERT_OK_AND_ASSIGN(auto work_groups,
+                       GetOptimizedPrefillWorkGroups(prefill_runner_set, 592));
+  EXPECT_THAT(work_groups,
+              ElementsAre(Pair("prefill_512", 512), Pair("prefill_128", 80)));
+}
+
+TEST(LlmLiteRTCompiledModelExecutorUtilsTest,
+     GetOptimizedPrefillWorkGroups_FallbackOverride) {
+  SortedPrefillSignatureMap prefill_runner_set = {
+      {512, "prefill_512"}, {384, "prefill_384"}, {128, "prefill_128"}};
+  // Remainder 256 >= 512/2, BUT next chunk 384 > 512/2. So fallback to 384!
+  // At 384, Remainder 256 >= 384/2. Upgrades to 384.
+  ASSERT_OK_AND_ASSIGN(auto work_groups,
+                       GetOptimizedPrefillWorkGroups(prefill_runner_set, 768));
+  EXPECT_THAT(work_groups,
+              ElementsAre(Pair("prefill_512", 512), Pair("prefill_384", 256)));
+}
+
+TEST(LlmLiteRTCompiledModelExecutorUtilsTest,
+     GetOptimizedPrefillWorkGroups_NoUpgradeAfterFallback) {
+  SortedPrefillSignatureMap prefill_runner_set = {
+      {512, "prefill_512"}, {384, "prefill_384"}, {128, "prefill_128"}};
+  // Remainder 128. Fallback triggered at 512 because 384 > 256.
+  // At 384, 128 < 384/2, so no upgrade.
+  // Ends up using perfectly fitting 128.
+  ASSERT_OK_AND_ASSIGN(auto work_groups,
+                       GetOptimizedPrefillWorkGroups(prefill_runner_set, 640));
+  EXPECT_THAT(work_groups,
+              ElementsAre(Pair("prefill_512", 512), Pair("prefill_128", 128)));
+}
+
+TEST(LlmLiteRTCompiledModelExecutorUtilsTest,
+     GetOptimizedPrefillWorkGroups_MultipleFullChunksThenUpgrade) {
+  SortedPrefillSignatureMap prefill_runner_set = {
+      {100, "prefill_100"}, {30, "prefill_30"}, {10, "prefill_10"}};
+  // 2 full 100 chunks. Remainder 80 >= 100/2. Upgrade to a third 100 chunk!
+  ASSERT_OK_AND_ASSIGN(auto work_groups,
+                       GetOptimizedPrefillWorkGroups(prefill_runner_set, 280));
+  EXPECT_THAT(work_groups,
+              ElementsAre(Pair("prefill_100", 100), Pair("prefill_100", 100),
+                          Pair("prefill_100", 80)));
+}
+
+TEST(LlmLiteRTCompiledModelExecutorUtilsTest,
+     GetOptimizedPrefillWorkGroups_DenseTierCascadeTrap) {
+  SortedPrefillSignatureMap prefill_runner_set = {{600, "prefill_600"},
+                                                  {500, "prefill_500"}};
+  // Input 599. Remainder 599. Next size 500.
+  // 500 * 2 >= 600, but 599 > 500!
+  // Fallback is skipped! Upgrades to 600 instead of outputting {{500, 500},
+  // {500, 99}}.
+  ASSERT_OK_AND_ASSIGN(auto work_groups,
+                       GetOptimizedPrefillWorkGroups(prefill_runner_set, 599));
+  EXPECT_THAT(work_groups, ElementsAre(Pair("prefill_600", 599)));
+}
+
 TEST(LlmLiteRTCompiledModelExecutorUtilsTest, GetPrefillRunnerSetFromModel) {
   auto model_path =
       std::filesystem::path(::testing::SrcDir()) /
@@ -802,6 +874,59 @@ TEST(LlmLiteRTCompiledModelExecutorUtilsTest, GetGpuModelCacheData_WithFd) {
 
   std::string expected_cache_key = absl::StrCat("fd_", expected_metadata_id);
   EXPECT_EQ(cache_data.cache_key, expected_cache_key);
+}
+
+class DummyExecutorSettings : public ExecutorSettingsBase {
+ public:
+  DummyExecutorSettings()
+      : ExecutorSettingsBase(*ModelAssets::Create("dummy_path")) {}
+};
+
+TEST(LlmLiteRTCompiledModelExecutorUtilsTest,
+     SetCpuOptions_ConfigureSuccessfully) {
+  LITERT_ASSERT_OK_AND_ASSIGN(auto cpu_options, litert::CpuOptions::Create());
+  EXPECT_OK(SetCpuOptions(cpu_options, 8));
+}
+
+TEST(LlmLiteRTCompiledModelExecutorUtilsTest,
+     SetCommonGpuOptions_DefaultAndFallbackPrecisions) {
+  DummyExecutorSettings executor_settings;
+  LITERT_ASSERT_OK_AND_ASSIGN(auto gpu_options, litert::GpuOptions::Create());
+
+  // Without fallback_activation_data_type specified, defaults to FLOAT32.
+  EXPECT_OK(SetCommonGpuOptions(executor_settings, gpu_options));
+
+  // With FLOAT32 fallback specified, configures kFp32.
+  EXPECT_OK(SetCommonGpuOptions(executor_settings, gpu_options,
+                                ActivationDataType::FLOAT32));
+
+  // With FLOAT16, INT16, and INT8 fallback specified, configures kFp16.
+  EXPECT_OK(SetCommonGpuOptions(executor_settings, gpu_options,
+                                ActivationDataType::FLOAT16));
+  EXPECT_OK(SetCommonGpuOptions(executor_settings, gpu_options,
+                                ActivationDataType::INT16));
+  EXPECT_OK(SetCommonGpuOptions(executor_settings, gpu_options,
+                                ActivationDataType::INT8));
+}
+
+TEST(LlmLiteRTCompiledModelExecutorUtilsTest,
+     SetCommonGpuOptions_ExplicitActivationPrecisionOverride) {
+  DummyExecutorSettings executor_settings;
+  LITERT_ASSERT_OK_AND_ASSIGN(auto gpu_options, litert::GpuOptions::Create());
+
+  // Explicit FLOAT32 overrides fallback of FLOAT16/INT8.
+  executor_settings.SetActivationDataType(ActivationDataType::FLOAT32);
+  EXPECT_OK(SetCommonGpuOptions(executor_settings, gpu_options,
+                                ActivationDataType::FLOAT16));
+
+  // Explicit INT8 or FLOAT16 overrides fallback of FLOAT32.
+  executor_settings.SetActivationDataType(ActivationDataType::INT8);
+  EXPECT_OK(SetCommonGpuOptions(executor_settings, gpu_options,
+                                ActivationDataType::FLOAT32));
+
+  executor_settings.SetActivationDataType(ActivationDataType::FLOAT16);
+  EXPECT_OK(SetCommonGpuOptions(executor_settings, gpu_options,
+                                ActivationDataType::FLOAT32));
 }
 
 }  // namespace

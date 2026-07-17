@@ -60,7 +60,6 @@
 #include "runtime/executor/llm_executor_io_types.h"
 #include "runtime/util/convert_tensor_buffer.h"  // IWYU pragma: keep
 #include "runtime/util/tensor_buffer_util.h"
-#include "tflite/delegates/xnnpack/xnnpack_delegate.h"  // from @litert
 #include "tflite/types/half.h"  // from @litert
 
 #if !defined(LITERT_DISABLE_NPU)
@@ -73,39 +72,16 @@ namespace {
 // Set the default GPU options for the model.
 absl::Status SetGpuOptions(const AudioExecutorSettings& executor_settings,
                            litert::GpuOptions& gpu_options) {
-#if defined(LITERT_USE_WEBGPU_ACCELERATOR)
-  gpu_options.SetBackend(GpuOptions::Backend::kWebGpu);
-#endif  // defined(LITERT_USE_WEBGPU_ACCELERATOR)
-  gpu_options.EnableConstantTensorSharing(true);
-  // Mixed precision setting overrides the activation data type setting. The
-  // underlying delegate uses fp32 precision to represent mixed precision, so we
-  // set it to fp32 here.
-  if (executor_settings.IsMixedPrecisionEnabled()) {
-    gpu_options.SetPrecision(GpuOptions::Precision::kFp32);
-  } else if (executor_settings.GetActivationDataType().has_value()) {
-    if (executor_settings.GetActivationDataType().value() ==
-        ActivationDataType::FLOAT32) {
-      gpu_options.SetPrecision(GpuOptions::Precision::kFp32);
-    } else {
-      gpu_options.SetPrecision(GpuOptions::Precision::kFp16);
-    }
-  } else {
-    // Default to fp32 if no activation data type is specified, for backward
-    // compatibility with previous launched models.
-    gpu_options.SetPrecision(GpuOptions::Precision::kFp32);
-  }
-#if defined(__APPLE__)
-  gpu_options.SetPreferTextureWeights(false);
-  gpu_options.SetUseMetalArgumentBuffers(true);
-#else   // !__APPLE__
-  gpu_options.SetPreferTextureWeights(true);
-#endif  // !__APPLE__
-  gpu_options.SetMadviseOriginalSharedTensors(true);
-  gpu_options.SetConvertWeightsOnGpu(true);
+  ABSL_RETURN_IF_ERROR(
+      ::litert::lm::SetCommonGpuOptions(executor_settings, gpu_options));
   gpu_options.SetHintFullyDelegatedToSingleDelegate(true);
   gpu_options.EnableInfiniteFloatCapping(true);
   gpu_options.SetNumStepsOfCommandBufferPreparations(2);
   gpu_options.EnableExternalTensorsMode(false);
+  gpu_options.AddExternalTensorPattern("w_prime");
+  gpu_options.AddBufferStorageTensorPattern("w_prime");
+  gpu_options.AddExternalTensorPattern("lora_");
+  gpu_options.AddBufferStorageTensorPattern("lora_");
   gpu_options.SetNumThreadsToUpload(2);
   gpu_options.SetNumThreadsToCompile(1);
   gpu_options.EnableAllowSrcQuantizedFcConvOps(false);
@@ -115,12 +91,8 @@ absl::Status SetGpuOptions(const AudioExecutorSettings& executor_settings,
 // Set the default CPU options for the model.
 absl::Status SetCpuOptions(const AudioExecutorSettings& executor_settings,
                            litert::CpuOptions& cpu_options) {
-  cpu_options.SetNumThreads(executor_settings.GetNumThreads());
-  auto default_xnn_options = TfLiteXNNPackDelegateOptionsDefault();
-  cpu_options.SetXNNPackFlags(
-      default_xnn_options.flags |
-      TFLITE_XNNPACK_DELEGATE_FLAG_DYNAMIC_FULLY_CONNECTED);
-  return absl::OkStatus();
+  return ::litert::lm::SetCpuOptions(cpu_options,
+                                     executor_settings.GetNumThreads());
 }
 
 constexpr std::array<absl::string_view, 3> kAudioInputNames = {
@@ -213,7 +185,8 @@ absl::StatusOr<std::unique_ptr<AudioContext>> AudioStreamingContext::Clone()
     LITERT_ASSIGN_OR_RETURN(auto new_buffer, buffer.Duplicate());
     new_state_buffers[name] = std::move(new_buffer);
   }
-  auto context = std::make_unique<AudioStreamingContext>(std::move(new_state_buffers));
+  auto context = std::make_unique<AudioStreamingContext>(
+      std::move(new_state_buffers));
   context->buffered_spectrogram() = buffered_spectrogram_;
   return context;
 }
@@ -262,7 +235,7 @@ AudioLiteRtCompiledModelExecutor::AudioStaticEncoder::Initialize() {
                             options.GetGoogleTensorOptions());
     google_tensor_options.SetPerformanceMode(
         google_tensor::GoogleTensorOptions::PerformanceMode::kBurst);
-    options.SetHardwareAccelerators(litert::HwAccelerators::kCpu);
+    options.SetHardwareAccelerators(litert::HwAccelerators::kNpu);
 #endif  // !defined(LITERT_DISABLE_NPU)
   } else {
     return absl::InvalidArgumentError(
@@ -393,7 +366,7 @@ AudioLiteRtCompiledModelExecutor::AudioStreamingEncoder::Initialize() {
                             options.GetGoogleTensorOptions());
     google_tensor_options.SetPerformanceMode(
         google_tensor::GoogleTensorOptions::PerformanceMode::kBurst);
-    options.SetHardwareAccelerators(litert::HwAccelerators::kCpu);
+    options.SetHardwareAccelerators(litert::HwAccelerators::kNpu);
 #endif  // !defined(LITERT_DISABLE_NPU)
   } else {
     return absl::InvalidArgumentError(
@@ -595,7 +568,7 @@ absl::Status AudioLiteRtCompiledModelExecutor::AudioAdapter::Initialize() {
                             options.GetGoogleTensorOptions());
     google_tensor_options.SetPerformanceMode(
         google_tensor::GoogleTensorOptions::PerformanceMode::kBurst);
-    options.SetHardwareAccelerators(litert::HwAccelerators::kCpu);
+    options.SetHardwareAccelerators(litert::HwAccelerators::kNpu);
 #endif  // !defined(LITERT_DISABLE_NPU)
   } else {
     return absl::InvalidArgumentError(
@@ -648,9 +621,9 @@ absl::StatusOr<std::unique_ptr<AudioLiteRtCompiledModelExecutor>>
 AudioLiteRtCompiledModelExecutor::Create(
     AudioExecutorSettings executor_settings, Environment& env) {
   if (executor_settings.GetMaxSequenceLength() > 0) {
-    ABSL_LOG(INFO) << "Max sequence length is not used for "
-                      "AudioLiteRtCompiledModelExecutor, "
-                      "which can handle variable length input.";
+    ABSL_VLOG(1) << "Max sequence length is not used for "
+                    "AudioLiteRtCompiledModelExecutor, "
+                    "which can handle variable length input.";
   }
   LITERT_ASSIGN_OR_RETURN(
       auto resources,
@@ -681,8 +654,8 @@ AudioLiteRtCompiledModelExecutor::Create(
         audio_adapter,
         AudioAdapter::Create(executor_settings, env, *audio_adapter_model_or));
   } else {
-    ABSL_LOG(INFO) << "Audio adapter model is not found. Audio encoder output "
-                      "will be used directly.";
+    ABSL_VLOG(1) << "Audio adapter model is not found. Audio encoder output "
+                    "will be used directly.";
   }
   int sequence_length = 0;
   if (audio_encoder->GetInputMaskBuffer() != nullptr) {
@@ -775,9 +748,9 @@ AudioLiteRtCompiledModelExecutor::Create(
           "Unsupported type mismatch between audio encoder and adapter");
     }
   }
-  ABSL_LOG(INFO) << "AudioLiteRtCompiledModelExecutor created with "
-                    "encoder_shrinking_factor: "
-                 << encoder_shrinking_factor;
+  ABSL_VLOG(1) << "AudioLiteRtCompiledModelExecutor created with "
+                  "encoder_shrinking_factor: "
+               << encoder_shrinking_factor;
   return absl::WrapUnique(new AudioLiteRtCompiledModelExecutor(
       std::move(executor_settings), std::move(executor_properties), env,
       std::move(resources), std::move(audio_encoder), std::move(audio_adapter),

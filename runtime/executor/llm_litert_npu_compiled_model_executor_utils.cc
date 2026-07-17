@@ -21,6 +21,7 @@
 #include <cstring>
 #include <optional>
 #include <string>
+#include <type_traits>
 #include <utility>
 #include <vector>
 
@@ -325,7 +326,8 @@ absl::StatusOr<int> ApplyGreedySampling(::litert::TensorBuffer& decoded_logits,
 absl::Status HWKVCacheUpdate(
     absl::flat_hash_map<absl::string_view, ::litert::TensorBuffer>& in_buffers,
     absl::flat_hash_map<absl::string_view, ::litert::TensorBuffer>& out_buffers,
-    const absl::flat_hash_map<absl::string_view, HWQuantParams>& quant_params) {
+    const absl::flat_hash_map<absl::string_view, HWQuantParams>& quant_params,
+    bool enable_swa) {
   static constexpr absl::string_view kInputPos = "input_pos";
   if (!in_buffers.contains(kInputPos)) {
     return absl::InvalidArgumentError("Missing input_pos buffer");
@@ -346,16 +348,36 @@ absl::Status HWKVCacheUpdate(
   if (pos_lock.second == nullptr) {
     return absl::InternalError("Failed to lock input_pos buffer");
   }
-  int start_pos = static_cast<const int32_t*>(pos_lock.second)[0];
-  if (start_pos < 0) {
-    return absl::InvalidArgumentError(
-        absl::StrCat("input_pos must be non-negative: ", start_pos));
+
+  const int32_t* input_pos_ptr = static_cast<const int32_t*>(pos_lock.second);
+
+  // Extract the valid mask if present, which is used to filter out padding
+  // tokens and to only update the cache with valid tokens.
+  static constexpr absl::string_view kValidMask = "valid_mask";
+  const bool* valid_mask = nullptr;
+  int64_t valid_mask_size = 0;
+  std::optional<::litert::TensorBufferScopedLock> valid_mask_lock;
+  if (in_buffers.contains(kValidMask)) {
+    auto& buf = in_buffers.at(kValidMask);
+    LITERT_ASSIGN_OR_RETURN(auto valid_mask_type, buf.TensorType());
+    LITERT_ASSIGN_OR_RETURN(auto num_elements,
+                            valid_mask_type.Layout().NumElements());
+    valid_mask_size = num_elements;
+    if (valid_mask_type.ElementType() != ::litert::ElementType::Bool) {
+      return absl::InvalidArgumentError("valid_mask must be Bool type");
+    }
+    LITERT_ASSIGN_OR_RETURN(auto lock,
+                            ::litert::TensorBufferScopedLock::Create(
+                                buf, ::litert::TensorBuffer::LockMode::kRead));
+    valid_mask = static_cast<const bool*>(lock.second);
+    valid_mask_lock.emplace(std::move(lock.first));
   }
 
   auto perform_update = [&](::litert::TensorBuffer& cache,
                             const ::litert::RankedTensorType& slice_type,
-                            const void* slice_ptr,
-                            size_t slice_bytes) -> absl::Status {
+                            const void* slice_ptr, size_t slice_bytes,
+                            absl::string_view cache_name,
+                            absl::string_view slice_name) -> absl::Status {
     LITERT_ASSIGN_OR_RETURN(auto cache_type, cache.TensorType());
 
     int cache_rank = cache_type.Layout().Rank();
@@ -418,8 +440,67 @@ absl::Status HWKVCacheUpdate(
           "Failed to identify hidden dimension in slice");
     }
 
-    if (start_pos + slice_seq > cache_seq) {
-      return absl::OutOfRangeError("KV-cache update out of range");
+    if (slice_seq > cache_seq) {
+      return absl::InvalidArgumentError(
+          absl::StrCat("Slice sequence length (", slice_seq,
+                       ") exceeds cache capacity (", cache_seq, ")"));
+    }
+
+    int64_t real_start = 0;
+    int64_t real_len = slice_seq;
+    int64_t start_pos = input_pos_ptr[0];
+
+    if (valid_mask != nullptr) {
+      int64_t mask_offset = pos_num_elements - slice_seq;
+      if (mask_offset < 0) {
+        return absl::InternalError(
+            "slice_seq cannot be larger than pos_num_elements");
+      }
+      const bool* sub_mask = valid_mask + mask_offset;
+      int64_t first_true = -1;
+      int64_t true_count = 0;
+      for (int64_t i = 0; i < slice_seq; ++i) {
+        if (sub_mask[i]) {
+          if (first_true == -1) {
+            first_true = i;
+          }
+          ++true_count;
+        }
+      }
+      if (first_true != -1) {
+        real_start = first_true;
+        real_len = true_count;
+        // NOTE: The current implementation assumes that valid tokens in
+        // `valid_mask` form a contiguous range from `first_true` to
+        // `first_true + true_count - 1`. If `valid_mask` contains
+        // non-contiguous valid entries (e.g., [T, F, T]), the memcpy operations
+        // below will incorrectly copy a contiguous block. This is acceptable
+        // for typical prefill inputs where valid tokens are always contiguous.
+        start_pos = input_pos_ptr[mask_offset + real_start];
+      } else {
+        real_len = 0;
+      }
+    } else {
+      if (slice_seq < pos_num_elements) {
+        start_pos = input_pos_ptr[pos_num_elements - slice_seq];
+      }
+    }
+
+    if (real_len == 0) {
+      return absl::OkStatus();
+    }
+
+    if (start_pos < 0) {
+      return absl::InvalidArgumentError(
+          absl::StrCat("input_pos must be non-negative: ", start_pos));
+    }
+
+    int64_t wp = enable_swa ? (start_pos % cache_seq) : start_pos;
+
+    if (wp + real_len > cache_seq) {
+      if (!enable_swa) {
+        return absl::OutOfRangeError("KV-cache update out of range");
+      }
     }
 
     // static constexpr int kSliceOuterRank = 2;
@@ -475,87 +556,111 @@ absl::Status HWKVCacheUpdate(
       if (!cache_is_transposed) {
         if (!slice_is_transposed || slice_seq == 1) {
           // Cache is [..., seq, hidden], Slice is [..., seq, hidden] (or seq=1)
-          std::memcpy(c_ptr + (start_pos * hidden_dim * element_size), s_ptr,
-                      slice_seq * hidden_dim * element_size);
+          int64_t chunk1_seq = std::min(real_len, cache_seq - wp);
+          int64_t chunk2_seq = real_len - chunk1_seq;
+          const uint8_t* s_ptr_offset =
+              s_ptr + (real_start * hidden_dim * element_size);
+          std::memcpy(c_ptr + (wp * hidden_dim * element_size), s_ptr_offset,
+                      chunk1_seq * hidden_dim * element_size);
+          if (chunk2_seq > 0) {
+            std::memcpy(c_ptr,
+                        s_ptr_offset + (chunk1_seq * hidden_dim * element_size),
+                        chunk2_seq * hidden_dim * element_size);
+          }
         } else {
           // Cache is [..., seq, hidden], Slice is [..., hidden, seq]
-          for (int64_t s = 0; s < slice_seq; ++s) {
+          for (int64_t s = 0; s < real_len; ++s) {
+            int64_t wrapped_pos = (wp + s) % cache_seq;
+            int64_t slice_s = real_start + s;
             for (int64_t h = 0; h < hidden_dim; ++h) {
-              std::memcpy(
-                  c_ptr + ((start_pos + s) * hidden_dim + h) * element_size,
-                  s_ptr + (h * slice_seq + s) * element_size, element_size);
+              std::memcpy(c_ptr + (wrapped_pos * hidden_dim + h) * element_size,
+                          s_ptr + (h * slice_seq + slice_s) * element_size,
+                          element_size);
             }
           }
         }
       } else {
         // Cache is [..., hidden, seq]
-        if (slice_seq == 1) {
+        if ((!slice_is_transposed && real_len == 1) || slice_seq == 1) {
+          const uint8_t* s_ptr_offset =
+              s_ptr + (real_start * hidden_dim * element_size);
 #if defined(__ANDROID__) && defined(__ARM_NEON) && defined(__aarch64__)
           if (element_size == 1) {
             int64_t h = 0;
             for (; h <= hidden_dim - 16; h += 16) {
-              uint8x16_t v = vld1q_u8(s_ptr + h);
-              c_ptr[(h + 0) * cache_seq + start_pos] = vgetq_lane_u8(v, 0);
-              c_ptr[(h + 1) * cache_seq + start_pos] = vgetq_lane_u8(v, 1);
-              c_ptr[(h + 2) * cache_seq + start_pos] = vgetq_lane_u8(v, 2);
-              c_ptr[(h + 3) * cache_seq + start_pos] = vgetq_lane_u8(v, 3);
-              c_ptr[(h + 4) * cache_seq + start_pos] = vgetq_lane_u8(v, 4);
-              c_ptr[(h + 5) * cache_seq + start_pos] = vgetq_lane_u8(v, 5);
-              c_ptr[(h + 6) * cache_seq + start_pos] = vgetq_lane_u8(v, 6);
-              c_ptr[(h + 7) * cache_seq + start_pos] = vgetq_lane_u8(v, 7);
-              c_ptr[(h + 8) * cache_seq + start_pos] = vgetq_lane_u8(v, 8);
-              c_ptr[(h + 9) * cache_seq + start_pos] = vgetq_lane_u8(v, 9);
-              c_ptr[(h + 10) * cache_seq + start_pos] = vgetq_lane_u8(v, 10);
-              c_ptr[(h + 11) * cache_seq + start_pos] = vgetq_lane_u8(v, 11);
-              c_ptr[(h + 12) * cache_seq + start_pos] = vgetq_lane_u8(v, 12);
-              c_ptr[(h + 13) * cache_seq + start_pos] = vgetq_lane_u8(v, 13);
-              c_ptr[(h + 14) * cache_seq + start_pos] = vgetq_lane_u8(v, 14);
-              c_ptr[(h + 15) * cache_seq + start_pos] = vgetq_lane_u8(v, 15);
+              uint8x16_t v = vld1q_u8(s_ptr_offset + h);
+              c_ptr[(h + 0) * cache_seq + wp] = vgetq_lane_u8(v, 0);
+              c_ptr[(h + 1) * cache_seq + wp] = vgetq_lane_u8(v, 1);
+              c_ptr[(h + 2) * cache_seq + wp] = vgetq_lane_u8(v, 2);
+              c_ptr[(h + 3) * cache_seq + wp] = vgetq_lane_u8(v, 3);
+              c_ptr[(h + 4) * cache_seq + wp] = vgetq_lane_u8(v, 4);
+              c_ptr[(h + 5) * cache_seq + wp] = vgetq_lane_u8(v, 5);
+              c_ptr[(h + 6) * cache_seq + wp] = vgetq_lane_u8(v, 6);
+              c_ptr[(h + 7) * cache_seq + wp] = vgetq_lane_u8(v, 7);
+              c_ptr[(h + 8) * cache_seq + wp] = vgetq_lane_u8(v, 8);
+              c_ptr[(h + 9) * cache_seq + wp] = vgetq_lane_u8(v, 9);
+              c_ptr[(h + 10) * cache_seq + wp] = vgetq_lane_u8(v, 10);
+              c_ptr[(h + 11) * cache_seq + wp] = vgetq_lane_u8(v, 11);
+              c_ptr[(h + 12) * cache_seq + wp] = vgetq_lane_u8(v, 12);
+              c_ptr[(h + 13) * cache_seq + wp] = vgetq_lane_u8(v, 13);
+              c_ptr[(h + 14) * cache_seq + wp] = vgetq_lane_u8(v, 14);
+              c_ptr[(h + 15) * cache_seq + wp] = vgetq_lane_u8(v, 15);
             }
             for (; h < hidden_dim; ++h) {
-              c_ptr[h * cache_seq + start_pos] = s_ptr[h];
+              c_ptr[h * cache_seq + wp] = s_ptr_offset[h];
             }
           } else if (element_size == 2) {
             int64_t h = 0;
-            const uint16_t* s_ptr16 = reinterpret_cast<const uint16_t*>(s_ptr);
+            const uint16_t* s_ptr16 =
+                reinterpret_cast<const uint16_t*>(s_ptr_offset);
             uint16_t* c_ptr16 = reinterpret_cast<uint16_t*>(c_ptr);
             for (; h <= hidden_dim - 8; h += 8) {
               uint16x8_t v = vld1q_u16(s_ptr16 + h);
-              c_ptr16[(h + 0) * cache_seq + start_pos] = vgetq_lane_u16(v, 0);
-              c_ptr16[(h + 1) * cache_seq + start_pos] = vgetq_lane_u16(v, 1);
-              c_ptr16[(h + 2) * cache_seq + start_pos] = vgetq_lane_u16(v, 2);
-              c_ptr16[(h + 3) * cache_seq + start_pos] = vgetq_lane_u16(v, 3);
-              c_ptr16[(h + 4) * cache_seq + start_pos] = vgetq_lane_u16(v, 4);
-              c_ptr16[(h + 5) * cache_seq + start_pos] = vgetq_lane_u16(v, 5);
-              c_ptr16[(h + 6) * cache_seq + start_pos] = vgetq_lane_u16(v, 6);
-              c_ptr16[(h + 7) * cache_seq + start_pos] = vgetq_lane_u16(v, 7);
+              c_ptr16[(h + 0) * cache_seq + wp] = vgetq_lane_u16(v, 0);
+              c_ptr16[(h + 1) * cache_seq + wp] = vgetq_lane_u16(v, 1);
+              c_ptr16[(h + 2) * cache_seq + wp] = vgetq_lane_u16(v, 2);
+              c_ptr16[(h + 3) * cache_seq + wp] = vgetq_lane_u16(v, 3);
+              c_ptr16[(h + 4) * cache_seq + wp] = vgetq_lane_u16(v, 4);
+              c_ptr16[(h + 5) * cache_seq + wp] = vgetq_lane_u16(v, 5);
+              c_ptr16[(h + 6) * cache_seq + wp] = vgetq_lane_u16(v, 6);
+              c_ptr16[(h + 7) * cache_seq + wp] = vgetq_lane_u16(v, 7);
             }
             for (; h < hidden_dim; ++h) {
-              c_ptr16[h * cache_seq + start_pos] = s_ptr16[h];
+              c_ptr16[h * cache_seq + wp] = s_ptr16[h];
             }
           } else {
 #endif
             for (int64_t h = 0; h < hidden_dim; ++h) {
-              std::memcpy(c_ptr + (h * cache_seq + start_pos) * element_size,
-                          s_ptr + h * element_size, element_size);
+              std::memcpy(c_ptr + (h * cache_seq + wp) * element_size,
+                          s_ptr_offset + h * element_size, element_size);
             }
 #if defined(__ANDROID__) && defined(__ARM_NEON) && defined(__aarch64__)
           }
 #endif
         } else if (slice_is_transposed) {
           // Cache is [..., hidden, seq], Slice is [..., hidden, seq]
+          int64_t chunk1_seq = std::min(real_len, cache_seq - wp);
+          int64_t chunk2_seq = real_len - chunk1_seq;
           for (int64_t h = 0; h < hidden_dim; ++h) {
-            std::memcpy(c_ptr + (h * cache_seq + start_pos) * element_size,
-                        s_ptr + (h * slice_seq) * element_size,
-                        slice_seq * element_size);
+            std::memcpy(c_ptr + (h * cache_seq + wp) * element_size,
+                        s_ptr + (h * slice_seq + real_start) * element_size,
+                        chunk1_seq * element_size);
+            if (chunk2_seq > 0) {
+              std::memcpy(c_ptr + (h * cache_seq) * element_size,
+                          s_ptr + (h * slice_seq + real_start + chunk1_seq) *
+                                      element_size,
+                          chunk2_seq * element_size);
+            }
           }
         } else {
           // Cache is [..., hidden, seq], Slice is [..., seq, hidden]
-          for (int64_t s = 0; s < slice_seq; ++s) {
+          for (int64_t s = 0; s < real_len; ++s) {
+            int64_t wrapped_pos = (wp + s) % cache_seq;
+            int64_t slice_s = real_start + s;
             for (int64_t h = 0; h < hidden_dim; ++h) {
-              std::memcpy(
-                  c_ptr + (h * cache_seq + start_pos + s) * element_size,
-                  s_ptr + (s * hidden_dim + h) * element_size, element_size);
+              std::memcpy(c_ptr + (h * cache_seq + wrapped_pos) * element_size,
+                          s_ptr + (slice_s * hidden_dim + h) * element_size,
+                          element_size);
             }
           }
         }
@@ -609,9 +714,9 @@ absl::Status HWKVCacheUpdate(
                 static_cast<const LiteRtLayout&>(slice_type.Layout())));
         size_t dequantized_slice_bytes = num_elements * sizeof(float);
 
-        auto status = perform_update(cache, dequantized_slice_type,
-                                     dequantized_slice_scratch.data(),
-                                     dequantized_slice_bytes);
+        auto status = perform_update(
+            cache, dequantized_slice_type, dequantized_slice_scratch.data(),
+            dequantized_slice_bytes, cache_name, slice_name);
         if (!status.ok()) {
           return absl::Status(
               status.code(),
@@ -626,8 +731,8 @@ absl::Status HWKVCacheUpdate(
       }
     } else {
       // Direct update
-      auto status =
-          perform_update(cache, slice_type, slice_lock.second, slice_bytes);
+      auto status = perform_update(cache, slice_type, slice_lock.second,
+                                   slice_bytes, cache_name, slice_name);
       if (!status.ok()) {
         return absl::Status(
             status.code(),
@@ -738,16 +843,15 @@ absl::Status HWKVCacheUpdate(
 
 namespace {
 
-// Internal template for filling masks.
-// T: element type (int8_t or int16_t).
-// valid_val: value for "unmasked" (127 for i8, 0 for i16).
-// masked_val: value for "masked" (-128 for i8, -32767 for i16).
+// Internal template for filling a single mask.
 template <typename T>
-void FillMasksInternal(T* mask_local, T* mask_global, int64_t seq_q,
-                       int64_t seq_k, int32_t time_step,
-                       const int32_t* input_tokens, int64_t input_tokens_size,
-                       const bool* valid_mask, int64_t valid_mask_size,
-                       T valid_val, T masked_val) {
+void FillMaskInternal(T* mask, int64_t seq_q, int64_t seq_k, int32_t time_step,
+                      const int32_t* input_tokens, int64_t input_tokens_size,
+                      const bool* valid_mask, int64_t valid_mask_size,
+                      T valid_val, T masked_val, bool is_local,
+                      int64_t window_size) {
+  if (!mask) return;
+
   // Detection logic for capacity and batch_size.
   int64_t kv_cache_capacity = seq_k;
   bool has_batch_suffix = false;
@@ -771,34 +875,36 @@ void FillMasksInternal(T* mask_local, T* mask_global, int64_t seq_q,
   }
   const int64_t batch_size = has_batch_suffix ? seq_q : 0;
 
-  // Initialize with masked value (performance: memset if i8).
+  // Initialize with masked value.
   if (sizeof(T) == 1) {
-    if (mask_local) std::memset(mask_local, (int)masked_val, seq_q * seq_k);
-    if (mask_global) std::memset(mask_global, (int)masked_val, seq_q * seq_k);
+    std::memset(mask, (int)masked_val, seq_q * seq_k);
   } else {
     for (int64_t i = 0; i < seq_q * seq_k; ++i) {
-      if (mask_local) mask_local[i] = masked_val;
-      if (mask_global) mask_global[i] = masked_val;
+      mask[i] = masked_val;
     }
   }
 
   // Fill valid regions.
   for (int64_t q = 0; q < seq_q; ++q) {
-    // effective_pos is the position of the query token in the sequence.
     const int64_t effective_pos = time_step + q;
-    T* local_row = mask_local ? mask_local + (q * seq_k) : nullptr;
-    T* global_row = mask_global ? mask_global + (q * seq_k) : nullptr;
+    T* row = mask + (q * seq_k);
 
     // KV Cache Part (indices 0 to capacity-1)
-    // For Regular: valid if k < time_step.
-    // For MTP: valid if k <= time_step.
     const int64_t kv_valid_limit =
         has_batch_suffix ? time_step : (time_step + 1);
     for (int64_t k = 0; k < std::min(kv_valid_limit, kv_cache_capacity); ++k) {
-      if (global_row) global_row[k] = valid_val;
-      // Sliding window (512 tokens).
-      if (local_row && k >= effective_pos - 511) {
-        local_row[k] = valid_val;
+      if (is_local) {
+        int64_t t_k = k;
+        if (has_batch_suffix && time_step >= kv_cache_capacity) {
+          int64_t age = (time_step - 1 - k + kv_cache_capacity) %
+                        kv_cache_capacity;
+          t_k = time_step - 1 - age;
+        }
+        if (t_k >= effective_pos - (window_size - 1)) {
+          row[k] = valid_val;
+        }
+      } else {
+        row[k] = valid_val;
       }
     }
 
@@ -807,7 +913,6 @@ void FillMasksInternal(T* mask_local, T* mask_global, int64_t seq_q,
       for (int64_t k_rel = 0; k_rel < batch_size; ++k_rel) {
         int64_t k = kv_cache_capacity + k_rel;
         if (k >= seq_k) break;
-        // Causal + Validity check (for verify_mask).
         bool is_valid = true;
         if (valid_mask != nullptr) {
           if (k_rel < valid_mask_size) {
@@ -825,9 +930,7 @@ void FillMasksInternal(T* mask_local, T* mask_global, int64_t seq_q,
           }
         }
         if (k_rel <= q && is_valid) {
-          if (global_row) global_row[k] = valid_val;
-          if (local_row)
-            local_row[k] = valid_val;  // Current batch is always in window.
+          row[k] = valid_val;
         }
       }
     }
@@ -885,15 +988,49 @@ absl::Status HWMaskUpdate(
         "No mask buffer found in in_buffers or out_buffers");
   }
 
-  // Assume they have the same type and dimensions if both present.
-  ::litert::TensorBuffer* reference_buf =
-      mask_local_buf ? mask_local_buf : mask_global_buf;
+  auto get_shape_info = [](::litert::TensorBuffer* buf, int64_t& seq_q,
+                           int64_t& seq_k,
+                           ::litert::ElementType& type) -> absl::Status {
+    if (!buf) return absl::OkStatus();
+    LITERT_ASSIGN_OR_RETURN(auto t_type, buf->TensorType());
+    type = t_type.ElementType();
+    auto dims = t_type.Layout().Dimensions();
+    int rank = t_type.Layout().Rank();
+    seq_q = dims[rank - 2];
+    seq_k = dims[rank - 1];
+    return absl::OkStatus();
+  };
 
-  LITERT_ASSIGN_OR_RETURN(auto mask_type, reference_buf->TensorType());
-  auto mask_dims = mask_type.Layout().Dimensions();
-  int rank = mask_type.Layout().Rank();
-  int64_t seq_q = mask_dims[rank - 2];
-  int64_t seq_k = mask_dims[rank - 1];
+  int64_t seq_q_local = 0;
+  int64_t seq_k_local = 0;
+  ::litert::ElementType type_local = ::litert::ElementType::Int8;
+  if (mask_local_buf) {
+    LITERT_RETURN_IF_ERROR(
+        get_shape_info(mask_local_buf, seq_q_local, seq_k_local, type_local));
+  }
+
+  int64_t seq_q_global = 0;
+  int64_t seq_k_global = 0;
+  ::litert::ElementType type_global = ::litert::ElementType::Int8;
+  if (mask_global_buf) {
+    LITERT_RETURN_IF_ERROR(get_shape_info(mask_global_buf, seq_q_global,
+                                          seq_k_global, type_global));
+  }
+
+  if (mask_local_buf && mask_global_buf) {
+    if (seq_q_local != seq_q_global) {
+      return absl::InvalidArgumentError(
+          "Local and global masks must have same seq_q");
+    }
+    if (type_local != type_global) {
+      return absl::InvalidArgumentError(
+          "Local and global masks must have same element type");
+    }
+  }
+
+  int64_t seq_q = mask_local_buf ? seq_q_local : seq_q_global;
+  ::litert::ElementType mask_type =
+      mask_local_buf ? type_local : type_global;
 
   void* local_ptr = nullptr;
   void* global_ptr = nullptr;
@@ -922,8 +1059,9 @@ absl::Status HWMaskUpdate(
   int64_t valid_mask_size = 0;
   std::optional<::litert::TensorBufferScopedLock> valid_mask_lock;
   const bool* valid_mask = nullptr;
-  if (in_buffers.contains(kValidMask)) {
-    auto& buf = in_buffers.at(kValidMask);
+  auto it = in_buffers.find(kValidMask);
+  if (it != in_buffers.end()) {
+    auto& buf = it->second;
     LITERT_ASSIGN_OR_RETURN(auto valid_mask_type, buf.TensorType());
     LITERT_ASSIGN_OR_RETURN(auto num_elements,
                             valid_mask_type.Layout().NumElements());
@@ -938,46 +1076,79 @@ absl::Status HWMaskUpdate(
     valid_mask_lock.emplace(std::move(lock.first));
   }
 
-  // Dispatch by Dtype
-  if (mask_type.ElementType() == ::litert::ElementType::Int8) {
-    FillMasksInternal<int8_t>(static_cast<int8_t*>(local_ptr),
-                              static_cast<int8_t*>(global_ptr), seq_q, seq_k,
-                              time_step, input_tokens, input_tokens_size,
-                              valid_mask, valid_mask_size,
-                              /*valid_val=*/127, /*masked_val=*/-128);
-  } else if (mask_type.ElementType() == ::litert::ElementType::Int16) {
-    FillMasksInternal<int16_t>(static_cast<int16_t*>(local_ptr),
-                               static_cast<int16_t*>(global_ptr), seq_q, seq_k,
-                               time_step, input_tokens, input_tokens_size,
-                               valid_mask, valid_mask_size,
-                               /*valid_val=*/0, /*masked_val=*/-32767);
-  } else if (mask_type.ElementType() == ::litert::ElementType::Float32) {
-    FillMasksInternal<float>(static_cast<float*>(local_ptr),
-                             static_cast<float*>(global_ptr), seq_q, seq_k,
-                             time_step, input_tokens, input_tokens_size,
-                             valid_mask, valid_mask_size,
-                             /*valid_val=*/0.0f, /*masked_val=*/-1e9f);
-  } else if (mask_type.ElementType() == ::litert::ElementType::Float16) {
-    // Opaque uint16_t representation of IEEE 754 Float16.
-    // valid_val is 0.0f (0x0000) and masked_val is -infinity (0xFC00).
-    FillMasksInternal<uint16_t>(static_cast<uint16_t*>(local_ptr),
-                                static_cast<uint16_t*>(global_ptr), seq_q,
-                                seq_k, time_step, input_tokens,
-                                input_tokens_size, valid_mask, valid_mask_size,
-                                /*valid_val=*/0x0000, /*masked_val=*/0xFC00);
-  } else if (mask_type.ElementType() == ::litert::ElementType::BFloat16) {
-    // Opaque uint16_t representation of Brain Float16.
-    // valid_val is 0.0f (0x0000) and masked_val is -infinity (0xFF80).
-    FillMasksInternal<uint16_t>(static_cast<uint16_t*>(local_ptr),
-                                static_cast<uint16_t*>(global_ptr), seq_q,
-                                seq_k, time_step, input_tokens,
-                                input_tokens_size, valid_mask, valid_mask_size,
-                                /*valid_val=*/0x0000, /*masked_val=*/0xFF80);
+  // Determine window size for local mask.
+  int64_t local_window_size = 512;
+  if (mask_local_buf) {
+    int64_t local_capacity = seq_k_local;
+    if (seq_k_local > seq_q) {
+      int64_t candidate_cap = seq_k_local - seq_q;
+      if (candidate_cap % 64 == 0 || seq_q > 8) {
+        local_capacity = candidate_cap;
+      } else {
+        int64_t nearest_64 = (seq_k_local / 64) * 64;
+        if (nearest_64 > 0 && nearest_64 < seq_k_local &&
+            (seq_k_local - nearest_64) <= 8) {
+          local_capacity = nearest_64;
+        }
+      }
+    }
+    if (local_capacity != 4096) {
+      local_window_size = local_capacity;
+    }
+  }
+
+  auto fill_masks = [&](auto dummy) -> absl::Status {
+    using T = decltype(dummy);
+    T valid_val;
+    T masked_val;
+    if constexpr (std::is_same_v<T, int8_t>) {
+      valid_val = 127;
+      masked_val = -128;
+    } else if constexpr (std::is_same_v<T, int16_t>) {
+      valid_val = 0;
+      masked_val = -32767;
+    } else if constexpr (std::is_same_v<T, float>) {
+      valid_val = 0.0f;
+      masked_val = -1e9f;
+    } else if constexpr (std::is_same_v<T, uint16_t>) {
+      if (mask_type == ::litert::ElementType::Float16) {
+        valid_val = 0x0000;
+        masked_val = 0xFC00;
+      } else {
+        valid_val = 0x0000;
+        masked_val = 0xFF80;
+      }
+    } else {
+      return absl::InvalidArgumentError("Unsupported mask element type");
+    }
+
+    if (local_ptr) {
+      FillMaskInternal<T>(static_cast<T*>(local_ptr), seq_q, seq_k_local,
+                          time_step, input_tokens, input_tokens_size,
+                          valid_mask, valid_mask_size, valid_val, masked_val,
+                          /*is_local=*/true, local_window_size);
+    }
+    if (global_ptr) {
+      FillMaskInternal<T>(static_cast<T*>(global_ptr), seq_q, seq_k_global,
+                          time_step, input_tokens, input_tokens_size,
+                          valid_mask, valid_mask_size, valid_val, masked_val,
+                          /*is_local=*/false, /*window_size=*/0);
+    }
+    return absl::OkStatus();
+  };
+
+  if (mask_type == ::litert::ElementType::Int8) {
+    return fill_masks(int8_t{});
+  } else if (mask_type == ::litert::ElementType::Int16) {
+    return fill_masks(int16_t{});
+  } else if (mask_type == ::litert::ElementType::Float32) {
+    return fill_masks(float{});
+  } else if (mask_type == ::litert::ElementType::Float16 ||
+             mask_type == ::litert::ElementType::BFloat16) {
+    return fill_masks(uint16_t{});
   } else {
     return absl::InvalidArgumentError("Unsupported mask element type");
   }
-
-  return absl::OkStatus();
 }
 namespace {
 #if defined(__ANDROID__) && defined(__ARM_NEON) && defined(__aarch64__)

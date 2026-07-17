@@ -55,6 +55,7 @@
 #include "runtime/util/file_format_util.h"
 #include "runtime/util/file_util.h"
 #include "runtime/util/litert_lm_loader.h"
+#include "tflite/delegates/xnnpack/xnnpack_delegate.h"  // from @litert
 #include "runtime/util/model_asset_bundle_resources.h"
 #include "runtime/util/scoped_file.h"
 #include "runtime/util/status_macros.h"  //NOLINT
@@ -255,31 +256,85 @@ absl::StatusOr<SortedPrefillSignatureMap> GetPrefillRunnerSetFromModel(
 absl::StatusOr<std::vector<std::pair<std::string, int>>>
 GetOptimizedPrefillWorkGroups(
     const SortedPrefillSignatureMap& prefill_runner_set, int input_length) {
+  // A simple greedy approach can cause performance cliffs for devices that
+  // perform much better with longer sequence lengths See
+  // go/smarter-prefill-chunking for more details.
+  //
+  // Instead, we use a "cautious greedy" approach. We greedily fill with the
+  // largest sequence length possible. For the remainder, we evaluate whether to
+  // pack it into smaller chunks or "cautiously" upgrade it. If the remainder is
+  // at least half of the current sequence length, it is upgraded to use an
+  // extra full-sized chunk to prevent excessive fragmentation.
+  //
+  // An exception is made for models that have sequence lengths that are within
+  // a factor of 2 of each other (e.g. 128 and 256). In these cases, we will
+  // default back to standard greedy stacking, provided the remainder
+  // comfortably fits into the smaller sequence length. Otherwise the smaller
+  // sequence length will not be used.
+  //
+  // Examples:
+  // 1. input_length = 640, prefill_runner_set = {512, 128, 32}
+  //    work_groups = {{"sig_512", 512}, {"sig_128", 128}}
+  // 2. input_length = 768, prefill_runner_set = {512, 128, 32}
+  //    work_groups = {{"sig_512", 512}, {"sig_512", 256}}
+  // 3. input_length = 592, prefill_runner_set = {512, 128, 32}
+  //    work_groups = {{"sig_512", 512}, {"sig_128", 80}}
+  // 4. input_length = 130, prefill_runner_set = {512, 128}
+  //    work_groups = {{"sig_128", 128}, {"sig_128", 2}}
+  // 5. input_length = 599, prefill_runner_set = {600, 500}
+  //    work_groups = {{"sig_600", 599}}
+
   std::vector<std::pair<std::string, int>> work_groups;
-  // Current strategy:
-  // 1. Use the prefill runner with the largest sequence length, until the
-  // remaining length is less than its sequence length.
-  // 2. Finish the remaining length with one prefill call, using the runner with
-  // the sequence length as small as possible.
-  // TODO: b/378772479 - Improve this strategy once we have benchmarked costs.
-  int max_seq_len = prefill_runner_set.begin()->first;
-  while (input_length >= max_seq_len) {
-    work_groups.push_back(
-        std::make_pair(prefill_runner_set.begin()->second, max_seq_len));
-    input_length -= max_seq_len;
-  }
-  if (input_length > 0) {
-    for (auto it = prefill_runner_set.begin(); it != prefill_runner_set.end();
-         ++it) {
-      // If the next smaller runner can handle the remaining length, skip the
-      // current runner.
-      if (std::next(it) != prefill_runner_set.end() &&
-          std::next(it)->first >= input_length) {
-        continue;
-      }
+
+  // Starting with the largest sequence length and working our way down, we will
+  // add work groups to cover the input length.
+  for (auto it = prefill_runner_set.begin(); it != prefill_runner_set.end();
+       ++it) {
+    if (input_length <= 0) {
+      break;
+    }
+
+    int cur_seq_len = it->first;
+    int full_chunks = input_length / cur_seq_len;
+    int remainder = input_length % cur_seq_len;
+
+    // 1. Greedily add any full chunks of the current sequence length.
+    for (int i = 0; i < full_chunks; ++i) {
+      work_groups.push_back(std::make_pair(it->second, cur_seq_len));
+    }
+    input_length = remainder;
+
+    if (input_length == 0) {
+      break;
+    }
+
+    // 2. If there's no smaller sequence length available, we must cover the
+    // remainder with this runner.
+    auto next_it = std::next(it);
+    if (next_it == prefill_runner_set.end()) {
       work_groups.push_back(std::make_pair(it->second, input_length));
       break;
     }
+
+    int next_seq_len = next_it->first;
+
+    // 3. We need to decide whether to use the current sequence length
+    // runner to cover the remainder, or let the smaller runners take care of
+    // the remainder.
+    if (next_seq_len * 2 >= cur_seq_len && input_length <= next_seq_len) {
+      // Check fallback: if next_seq_len >= cur_seq_len / 2 AND remainder <=
+      // next_seq_len
+      //   Our sequence lengths are too close, AND the remainder fits
+      //   comfortably in the next sequence length, so let the smaller runners
+      //   handle it.
+      continue;
+    } else if (input_length * 2 >= cur_seq_len) {
+      // Check cautious threshold rule: if remainder >= cur_seq_len / 2
+      //   Cover with the current sequence length runner.
+      work_groups.push_back(std::make_pair(it->second, input_length));
+      break;
+    }
+    // Threshold not met: let smaller runners handle the remainder.
   }
   return work_groups;
 }
@@ -474,13 +529,53 @@ absl::Status GenericComputeTokenEmbeddings(
   return absl::OkStatus();
 }
 
+absl::Status SetCpuOptions(litert::CpuOptions& cpu_options, int num_threads) {
+  cpu_options.SetNumThreads(num_threads);
+  auto default_xnn_options = TfLiteXNNPackDelegateOptionsDefault();
+  cpu_options.SetXNNPackFlags(
+      default_xnn_options.flags |
+      TFLITE_XNNPACK_DELEGATE_FLAG_DYNAMIC_FULLY_CONNECTED |
+      TFLITE_XNNPACK_DELEGATE_FLAG_ENABLE_LATEST_OPERATORS);
+  return absl::OkStatus();
+}
+
+absl::Status SetCommonGpuOptions(
+    const ExecutorSettingsBase& executor_settings,
+    litert::GpuOptions& gpu_options,
+    std::optional<ActivationDataType> fallback_activation_data_type) {
+#if defined(LITERT_USE_WEBGPU_ACCELERATOR)
+  gpu_options.SetBackend(GpuOptions::Backend::kWebGpu);
+#endif  // defined(LITERT_USE_WEBGPU_ACCELERATOR)
+  gpu_options.EnableConstantTensorSharing(true);
+  ActivationDataType activation_type =
+      executor_settings.GetActivationDataType().has_value()
+          ? executor_settings.GetActivationDataType().value()
+          : fallback_activation_data_type.value_or(ActivationDataType::FLOAT32);
+  if (activation_type == ActivationDataType::FLOAT32) {
+    gpu_options.SetPrecision(litert::GpuOptions::Precision::kFp32);
+  } else {
+    // For FLOAT16, INT16, and INT8 activation data types, calculation
+    // precision of the GPU delegate is set to fp16.
+    gpu_options.SetPrecision(litert::GpuOptions::Precision::kFp16);
+  }
+#if defined(__APPLE__)
+  gpu_options.SetPreferTextureWeights(false);
+  gpu_options.SetUseMetalArgumentBuffers(true);
+#else   // !__APPLE__
+  gpu_options.SetPreferTextureWeights(true);
+#endif  // !__APPLE__
+  gpu_options.SetMadviseOriginalSharedTensors(true);
+  gpu_options.SetConvertWeightsOnGpu(true);
+  return absl::OkStatus();
+}
+
 absl::Status SetCpuCacheOptions(
     const absl::StatusOr<
         std::variant<std::string, std::shared_ptr<litert::lm::ScopedFile>>>&
         weight_cache_file,
     absl::string_view logging_prefix, litert::CpuOptions& cpu_options) {
   if (!weight_cache_file.ok()) {
-    ABSL_LOG(INFO) << logging_prefix << " does not use cache.";
+    ABSL_VLOG(1) << logging_prefix << " does not use cache.";
     return absl::OkStatus();
   }
 
@@ -492,15 +587,14 @@ absl::Status SetCpuCacheOptions(
       ABSL_ASSIGN_OR_RETURN(auto duplicated, scoped_cache_file->Duplicate());
       ABSL_ASSIGN_OR_RETURN(int fd, duplicated.Release());
       cpu_options.SetXNNPackWeightCacheFileDescriptor(fd);
-      ABSL_LOG(INFO) << logging_prefix
-                     << " use provided cache file descriptor: " << fd;
+      ABSL_VLOG(1) << logging_prefix
+                   << " use provided cache file descriptor: " << fd;
     }
   } else if (std::holds_alternative<std::string>(*weight_cache_file)) {
     const std::string& weight_cache_path =
         std::get<std::string>(*weight_cache_file);
     cpu_options.SetXNNPackWeightCachePath(weight_cache_path.c_str());
-    ABSL_LOG(INFO) << logging_prefix
-                   << " use cache path: " << weight_cache_path;
+    ABSL_VLOG(1) << logging_prefix << " use cache path: " << weight_cache_path;
   }
   return absl::OkStatus();
 }
@@ -525,10 +619,10 @@ absl::Status SetGpuCacheOptions(
           std::filesystem::path(std::get<std::string>(*weight_cache_file))
               .parent_path()
               .string();
-      ABSL_LOG(INFO) << (logging_prefix.empty()
-                             ? ""
-                             : absl::StrCat(logging_prefix, ": "))
-                     << "Setting serialization dir: " << cache_path;
+      ABSL_VLOG(1) << (logging_prefix.empty()
+                           ? ""
+                           : absl::StrCat(logging_prefix, ": "))
+                   << "Setting serialization dir: " << cache_path;
       gpu_options.SetSerializationDir(cache_path.c_str());
       serialization_dir_set = true;
     } else {
@@ -550,10 +644,10 @@ absl::Status SetGpuCacheOptions(
             std::filesystem::path(std::get<std::string>(*program_cache_file))
                 .parent_path()
                 .string();
-        ABSL_LOG(INFO) << (logging_prefix.empty()
-                               ? ""
-                               : absl::StrCat(logging_prefix, ": "))
-                       << "Setting program cache dir: " << cache_path;
+        ABSL_VLOG(1) << (logging_prefix.empty()
+                             ? ""
+                             : absl::StrCat(logging_prefix, ": "))
+                     << "Setting program cache dir: " << cache_path;
         gpu_options.SetSerializationDir(cache_path.c_str());
       }
     } else {

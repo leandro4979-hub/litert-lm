@@ -43,6 +43,7 @@ ABSL_DECLARE_FLAG(bool, report_peak_memory_footprint);
 ABSL_DECLARE_FLAG(bool, force_f32);
 ABSL_DECLARE_FLAG(bool, multi_turns);
 ABSL_DECLARE_FLAG(int, num_cpu_threads);
+ABSL_DECLARE_FLAG(bool, enable_ynnpack);
 ABSL_DECLARE_FLAG(bool, gpu_external_tensor_mode);
 ABSL_DECLARE_FLAG(bool, configure_magic_numbers);
 ABSL_DECLARE_FLAG(bool, verify_magic_numbers);
@@ -82,5 +83,6 @@ ABSL_DECLARE_FLAG(bool, use_hw_cache_update_for_npu);
 ABSL_DECLARE_FLAG(bool, use_hw_ple_for_npu);
 ABSL_DECLARE_FLAG(bool, enable_npu_debug_logging);
 ABSL_DECLARE_FLAG(bool, disable_input_prompt_as_hint);
+ABSL_DECLARE_FLAG(bool, gpu_enable_metal_residency_set);
 
 #endif  // THIRD_PARTY_ODML_LITERT_LM_RUNTIME_ENGINE_SHARED_FLAGS_H_

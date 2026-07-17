@@ -20,6 +20,7 @@ import abc
 import collections.abc
 import dataclasses
 from importlib import resources
+import json
 import logging
 import os
 import sys
@@ -269,6 +270,51 @@ class RepetitionPenaltyConfig:
 
 
 @dataclasses.dataclass
+class NoRepeatNgramConfig:
+  """Configuration for banning repetitive ngrams during generation.
+
+  Attributes:
+      no_repeat_ngram_size: The size of ngrams to ban. If set to an integer
+        greater than 0, all ngrams of that size can only occur once.
+      window_size: The maximum number of recent tokens to consider for banning.
+        A value of 0 means track all infinite history.
+  """
+
+  no_repeat_ngram_size: int | None = None
+  window_size: int | None = None
+
+  def __post_init__(self):
+    if self.no_repeat_ngram_size is not None and self.no_repeat_ngram_size < 0:
+      raise ValueError(
+          "no_repeat_ngram_size should be >= 0, but got"
+          f" {self.no_repeat_ngram_size}."
+      )
+    if self.window_size is not None and self.window_size < 0:
+      raise ValueError(
+          f"window_size should be >= 0, but got {self.window_size}."
+      )
+
+
+@dataclasses.dataclass
+class SuppressTokensConfig:
+  """Configuration for suppressing specific tokens during generation.
+
+  Attributes:
+      suppress_tokens: A collection of token IDs to suppress during generation.
+  """
+
+  suppress_tokens: collections.abc.Collection[int] | None = None
+
+  def __post_init__(self):
+    if self.suppress_tokens is not None:
+      for token_id in self.suppress_tokens:
+        if token_id < 0:
+          raise ValueError(
+              f"Token ID in suppress_tokens should be >= 0, but got {token_id}."
+          )
+
+
+@dataclasses.dataclass
 class LoraRankConfig:
   """Configuration for LoRA ranks.
 
@@ -354,11 +400,13 @@ class AbstractEngine(abc.ABC):
       tool_event_handler: ToolEventHandler | None = None,
       automatic_tool_calling: bool = True,
       extra_context: collections.abc.Mapping[str, Any] | None = None,
-      filter_channel_content_from_kv_cache: bool = False,
+      filter_channel_content_from_kv_cache: bool | None = None,
       thinking_config: ThinkingConfig | None = None,
       sampler_config: SamplerConfig | None = None,
       lora_config: LoraConfig | None = None,
       max_output_tokens: int | None = None,
+      chat_template: str | None = None,
+      enable_response_format: bool = False,
   ) -> AbstractConversation:
     """Creates a new conversation for this engine.
 
@@ -379,6 +427,10 @@ class AbstractEngine(abc.ABC):
           uses the engine's default values.
         lora_config: Configuration for LoRA adapters.
         max_output_tokens: The maximum number of output tokens.
+        chat_template: The Jinja chat template content to use for formatting. If
+          not set, use the default provided by the model or the engine.
+        enable_response_format: Whether to enable response format (constrained
+          decoding). If True, initializes the constraint provider LLGuidance.
     """
 
   @abc.abstractmethod
@@ -421,6 +473,47 @@ class AbstractEngine(abc.ABC):
     """Decodes token ids using the engine's tokenizer."""
 
 
+@dataclasses.dataclass
+class ResponseFormat:
+  """Response format for constrained decoding.
+
+  Currently supports JSON Schema and Regex.
+  """
+
+  class Type:
+    NONE = 0
+    REGEX = 1
+    JSON_OBJECT = 2
+
+  type: int
+  schema_or_pattern: str
+
+  @classmethod
+  def json(cls, schema: dict[str, Any] | str) -> ResponseFormat:
+    """Creates a JSON Schema response format.
+
+    Args:
+      schema: The JSON schema as a dictionary or a JSON string.
+    """
+    if isinstance(schema, dict):
+      schema = json.dumps(schema)
+    elif isinstance(schema, str):
+      try:
+        json.loads(schema)
+      except json.JSONDecodeError as e:
+        raise ValueError(f"Invalid JSON schema string: {e}") from e
+    return cls(type=cls.Type.JSON_OBJECT, schema_or_pattern=schema)
+
+  @classmethod
+  def regex(cls, pattern: str) -> ResponseFormat:
+    """Creates a Regex response format.
+
+    Args:
+      pattern: The regex pattern string.
+    """
+    return cls(type=cls.Type.REGEX, schema_or_pattern=pattern)
+
+
 class AbstractConversation(abc.ABC):
   """Abstract base class for managing LiteRT-LM conversations.
 
@@ -434,6 +527,8 @@ class AbstractConversation(abc.ABC):
       sampler_config: Configuration for the sampling process.
       lora_config: Configuration for LoRA adapters.
       max_output_tokens: The maximum number of output tokens.
+      chat_template: The Jinja chat template content to use for formatting. If
+        not set, use the default provided by the model or the engine.
   """
 
   def __init__(
@@ -454,6 +549,7 @@ class AbstractConversation(abc.ABC):
       sampler_config: SamplerConfig | None = None,
       lora_config: LoraConfig | None = None,
       max_output_tokens: int | None = None,
+      chat_template: str | None = None,
   ):
     """Initializes the instance.
 
@@ -470,6 +566,8 @@ class AbstractConversation(abc.ABC):
           uses the engine's default values.
         lora_config: Configuration for LoRA adapters.
         max_output_tokens: The maximum number of output tokens.
+        chat_template: The Jinja chat template content to use for formatting. If
+          not set, use the default provided by the model or the engine.
     """
     self.messages = messages or []
     self.tools = tools or []
@@ -478,6 +576,7 @@ class AbstractConversation(abc.ABC):
     self.extra_context = extra_context or {}
     self.thinking_config = thinking_config
     self.sampler_config = sampler_config
+    self.chat_template = chat_template
     self.lora_config = lora_config
     self.max_output_tokens = max_output_tokens
 
@@ -495,8 +594,11 @@ class AbstractConversation(abc.ABC):
       message: str | Contents | Message | collections.abc.Mapping[str, Any],
       *,
       repetition_penalty_config: RepetitionPenaltyConfig | None = None,
+      no_repeat_ngram_config: NoRepeatNgramConfig | None = None,
+      suppress_tokens_config: SuppressTokensConfig | None = None,
       max_output_tokens: int | None = None,
       thinking_config: ThinkingConfig | None = None,
+      response_format: ResponseFormat | None = None,
   ) -> collections.abc.Mapping[str, Any]:
     """Sends a message and returns the response.
 
@@ -509,8 +611,12 @@ class AbstractConversation(abc.ABC):
           `collections.abc.Mapping` (super flexible raw dictionary format).
         repetition_penalty_config: Configuration for penalizing repetitive
           tokens.
+        no_repeat_ngram_config: Configuration for banning repetitive ngrams.
+        suppress_tokens_config: Configuration for suppressing specific tokens.
         max_output_tokens: The maximum number of output tokens.
         thinking_config: Configuration for thinking/reasoning generation.
+        response_format: The expected format of the response. If provided, the
+          response will be constrained to this format.
 
     Returns:
         A dictionary containing the model's response. The structure is:
@@ -523,8 +629,11 @@ class AbstractConversation(abc.ABC):
       message: str | Contents | Message | collections.abc.Mapping[str, Any],
       *,
       repetition_penalty_config: RepetitionPenaltyConfig | None = None,
+      no_repeat_ngram_config: NoRepeatNgramConfig | None = None,
+      suppress_tokens_config: SuppressTokensConfig | None = None,
       max_output_tokens: int | None = None,
       thinking_config: ThinkingConfig | None = None,
+      response_format: ResponseFormat | None = None,
   ) -> collections.abc.Iterator[collections.abc.Mapping[str, Any]]:
     """Sends a message and streams the response.
 
@@ -537,8 +646,12 @@ class AbstractConversation(abc.ABC):
           `collections.abc.Mapping` (super flexible raw dictionary format).
         repetition_penalty_config: Configuration for penalizing repetitive
           tokens.
+        no_repeat_ngram_config: Configuration for banning repetitive ngrams.
+        suppress_tokens_config: Configuration for suppressing specific tokens.
         max_output_tokens: The maximum number of output tokens.
         thinking_config: Configuration for thinking/reasoning generation.
+        response_format: The expected format of the response. If provided, the
+          response will be constrained to this format.
 
     Returns:
         An iterator yielding dictionaries containing chunks of the model's

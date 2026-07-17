@@ -152,6 +152,7 @@ cc_library(
         "//runtime/util:model_asset_bundle_resources",
         "//runtime/util:scoped_file",
         "//runtime/util:tensor_buffer_util",
+        "@litert//tflite/delegates/xnnpack:xnnpack_delegate_hdrs_only",
         "@litert//tflite/types:half",
     ],
 )
@@ -256,7 +257,9 @@ cc_library(
         "@com_google_absl//absl/status:statusor",
         "@com_google_absl//absl/strings",
         "@com_google_absl//absl/strings:string_view",
+        "@com_google_absl//absl/synchronization",
         "@com_google_absl//absl/types:span",
+        "@litert//litert/c:litert_common",  # buildcleaner: keep
         "@litert//litert/c/internal:litert_external_litert_buffer_context",  # buildcleaner: keep
         "@litert//litert/cc:litert_compiled_model",
         "@litert//litert/cc:litert_element_type",
@@ -267,9 +270,11 @@ cc_library(
         "@litert//litert/cc:litert_model",
         "@litert//litert/cc:litert_model_types",
         "@litert//litert/cc:litert_options",
+        "@litert//litert/cc:litert_profiler",  # buildcleaner: keep
         "@litert//litert/cc:litert_ranked_tensor_type",
         "@litert//litert/cc:litert_tensor_buffer",
         "@litert//litert/cc:litert_tensor_buffer_types",
+        "@litert//litert/cc/internal:litert_handle",  # buildcleaner: keep
         "//runtime/components:model_resources",
         "//runtime/components:sampler",
         "//runtime/components:sampler_factory",
@@ -655,6 +660,8 @@ cc_test(
         ":llm_executor_settings_utils",
         "@com_google_googletest//:gtest_main",
         "@com_google_absl//absl/status",
+        "@litert//litert/c/options:litert_gpu_options",
+        "@litert//litert/test:matchers",
         "//runtime/util:test_utils",
     ],
 )
@@ -985,6 +992,7 @@ cc_test(
         ":llm_executor_settings",
         ":magic_number_configs_helper",
         "@com_google_googletest//:gtest_main",
+        "@com_google_absl//absl/status",
         "@com_google_absl//absl/status:status_macros",
         "@com_google_absl//absl/status:statusor",
         "@com_google_absl//absl/strings:string_view",

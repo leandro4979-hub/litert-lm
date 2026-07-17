@@ -22,6 +22,7 @@
 #include <variant>
 #include <vector>
 
+#include "absl/container/flat_hash_set.h"  // from @com_google_absl
 #include "absl/functional/any_invocable.h"  // from @com_google_absl
 #include "absl/log/absl_log.h"  // from @com_google_absl
 #include "absl/status/status.h"  // from @com_google_absl
@@ -30,6 +31,10 @@
 #include "absl/time/time.h"  // from @com_google_absl
 #include "nlohmann/json_fwd.hpp"  // from @nlohmann_json
 #include "litert/cc/internal/scoped_file.h"  // from @litert
+#include "runtime/components/logits_processor/constrained_decoding/llg_constraint_config.h"
+#include "runtime/components/logits_processor/no_repeat_ngram_config.h"
+#include "runtime/components/logits_processor/repetition_penalty_config.h"
+#include "runtime/components/logits_processor/suppress_tokens_config.h"
 #include "runtime/components/prompt_template.h"
 #include "runtime/conversation/conversation.h"
 #include "runtime/conversation/io_types.h"
@@ -181,8 +186,8 @@ jobject CreateBenchmarkInfoJni(
 
   double total_init_time_ms = 0.0;
   for (const auto& phase : benchmark_info.GetInitPhases()) {
-    ABSL_LOG(INFO) << "Init phase: " << phase.first << " took "
-                   << absl::ToDoubleMilliseconds(phase.second) << " ms";
+    ABSL_VLOG(1) << "Init phase: " << phase.first << " took "
+                 << absl::ToDoubleMilliseconds(phase.second) << " ms";
     total_init_time_ms += absl::ToDoubleMilliseconds(phase.second);
   }
 
@@ -334,6 +339,116 @@ litert::lm::ThinkingConfig CreateThinkingConfigFromJni(
   env->DeleteLocalRef(thinking_config_cls);
 
   return litert::lm::ThinkingConfig(enable_thinking, thinking_token_budget);
+}
+
+std::optional<float> GetOptionalFloatFieldFromJni(JNIEnv* env, jobject obj,
+                                                  jclass cls,
+                                                  const char* method_name) {
+  jmethodID mid = env->GetMethodID(cls, method_name, "()Ljava/lang/Float;");
+  if (mid == nullptr) {
+    if (env->ExceptionCheck()) env->ExceptionClear();
+    return std::nullopt;
+  }
+  jobject float_obj = env->CallObjectMethod(obj, mid);
+  if (float_obj == nullptr) {
+    return std::nullopt;
+  }
+  jclass float_cls = env->FindClass("java/lang/Float");
+  jmethodID float_val_mid = env->GetMethodID(float_cls, "floatValue", "()F");
+  float val = env->CallFloatMethod(float_obj, float_val_mid);
+  env->DeleteLocalRef(float_cls);
+  env->DeleteLocalRef(float_obj);
+  return val;
+}
+
+std::optional<int> GetOptionalIntFieldFromJni(JNIEnv* env, jobject obj,
+                                              jclass cls,
+                                              const char* method_name) {
+  jmethodID mid = env->GetMethodID(cls, method_name, "()Ljava/lang/Integer;");
+  if (mid == nullptr) {
+    if (env->ExceptionCheck()) env->ExceptionClear();
+    return std::nullopt;
+  }
+  jobject int_obj = env->CallObjectMethod(obj, mid);
+  if (int_obj == nullptr) {
+    return std::nullopt;
+  }
+  jclass int_cls = env->FindClass("java/lang/Integer");
+  jmethodID int_val_mid = env->GetMethodID(int_cls, "intValue", "()I");
+  int val = env->CallIntMethod(int_obj, int_val_mid);
+  env->DeleteLocalRef(int_cls);
+  env->DeleteLocalRef(int_obj);
+  return val;
+}
+
+litert::lm::RepetitionPenaltyConfig CreateRepetitionPenaltyConfigFromJni(
+    JNIEnv* env, jobject repetition_penalty_config_obj) {
+  jclass cls = env->GetObjectClass(repetition_penalty_config_obj);
+
+  auto repetition_penalty_opt = GetOptionalFloatFieldFromJni(
+      env, repetition_penalty_config_obj, cls, "getRepetitionPenalty");
+  auto presence_penalty_opt = GetOptionalFloatFieldFromJni(
+      env, repetition_penalty_config_obj, cls, "getPresencePenalty");
+  auto frequency_penalty_opt = GetOptionalFloatFieldFromJni(
+      env, repetition_penalty_config_obj, cls, "getFrequencyPenalty");
+  auto window_size_opt = GetOptionalIntFieldFromJni(
+      env, repetition_penalty_config_obj, cls, "getWindowSize");
+
+  env->DeleteLocalRef(cls);
+
+  auto default_config = litert::lm::RepetitionPenaltyConfig::Default();
+  return litert::lm::RepetitionPenaltyConfig(
+      repetition_penalty_opt.has_value() ? *repetition_penalty_opt
+                                         : default_config.repetition_penalty(),
+      presence_penalty_opt.has_value() ? *presence_penalty_opt
+                                       : default_config.presence_penalty(),
+      frequency_penalty_opt.has_value() ? *frequency_penalty_opt
+                                        : default_config.frequency_penalty(),
+      window_size_opt.has_value() ? *window_size_opt
+                                  : default_config.window_size());
+}
+
+litert::lm::NoRepeatNgramConfig CreateNoRepeatNgramConfigFromJni(
+    JNIEnv* env, jobject no_repeat_ngram_config_obj) {
+  jclass cls = env->GetObjectClass(no_repeat_ngram_config_obj);
+
+  auto no_repeat_ngram_size_opt = GetOptionalIntFieldFromJni(
+      env, no_repeat_ngram_config_obj, cls, "getNoRepeatNgramSize");
+  auto window_size_opt = GetOptionalIntFieldFromJni(
+      env, no_repeat_ngram_config_obj, cls, "getWindowSize");
+
+  env->DeleteLocalRef(cls);
+
+  auto default_config = litert::lm::NoRepeatNgramConfig::Default();
+  return litert::lm::NoRepeatNgramConfig(
+      no_repeat_ngram_size_opt.has_value()
+          ? *no_repeat_ngram_size_opt
+          : default_config.no_repeat_ngram_size(),
+      window_size_opt.has_value() ? *window_size_opt
+                                  : default_config.window_size());
+}
+
+litert::lm::SuppressTokensConfig CreateSuppressTokensConfigFromJni(
+    JNIEnv* env, jobject suppress_tokens_config_obj) {
+  jclass cls = env->GetObjectClass(suppress_tokens_config_obj);
+  jmethodID get_array_mid =
+      env->GetMethodID(cls, "getSuppressTokensArray", "()[I");
+  jintArray array_obj = (jintArray)env->CallObjectMethod(
+      suppress_tokens_config_obj, get_array_mid);
+
+  absl::flat_hash_set<int> suppress_tokens;
+  if (array_obj != nullptr) {
+    jsize size = env->GetArrayLength(array_obj);
+    jint* elements = env->GetIntArrayElements(array_obj, nullptr);
+    for (int i = 0; i < size; ++i) {
+      suppress_tokens.insert(elements[i]);
+    }
+    env->ReleaseIntArrayElements(array_obj, elements, JNI_ABORT);
+    env->DeleteLocalRef(array_obj);
+  }
+  env->DeleteLocalRef(cls);
+
+  return litert::lm::SuppressTokensConfig(std::move(suppress_tokens));
 }
 
 nlohmann::ordered_json GetExtraContextJson(JNIEnv* env,
@@ -916,10 +1031,11 @@ LITERTLM_JNIEXPORT jlong JNICALL JNI_METHOD(nativeCreateConversation)(
     jstring messages_json_string, jstring tools_description_json_string,
     jstring channels_json_string, jstring extra_context_json_string,
     jboolean enable_constrained_decoding,
-    jboolean filter_channel_content_from_kv_cache,
+    jobject filter_channel_content_from_kv_cache_obj,
     jstring overwrite_prompt_template, jstring lora_path_str,
     jstring audio_lora_path_str, jboolean prefill_preface_on_init,
-    jint max_output_token, jobject thinking_config_obj) {
+    jint max_output_token, jobject thinking_config_obj,
+    jboolean enable_response_format) {
   Engine* engine = reinterpret_cast<Engine*>(engine_pointer);
 
   // Create a native SessionConfig
@@ -1003,9 +1119,22 @@ LITERTLM_JNIEXPORT jlong JNICALL JNI_METHOD(nativeCreateConversation)(
           .SetSessionConfig(session_config)
           .SetPreface(json_preface)
           .SetEnableConstrainedDecoding(enable_constrained_decoding)
-          .SetFilterChannelContentFromKvCache(
-              filter_channel_content_from_kv_cache)
           .SetPrefillPrefaceOnInit(prefill_preface_on_init);
+
+  if (filter_channel_content_from_kv_cache_obj != nullptr) {
+    jclass boolean_class = env->FindClass("java/lang/Boolean");
+    jmethodID boolean_value_mid =
+        env->GetMethodID(boolean_class, "booleanValue", "()Z");
+    jboolean filter_val = env->CallBooleanMethod(
+        filter_channel_content_from_kv_cache_obj, boolean_value_mid);
+    env->DeleteLocalRef(boolean_class);
+    conversation_config_builder.SetFilterChannelContentFromKvCache(filter_val);
+  }
+
+  if (enable_response_format) {
+    conversation_config_builder.SetConstraintProviderConfig(
+        litert::lm::LlGuidanceConfig());
+  }
 
   // Set the channels, if provided.
   // If channels is nullptr, the Conversation will use the channels defined in
@@ -1074,8 +1203,10 @@ LITERTLM_JNIEXPORT void JNICALL JNI_METHOD(nativeDeleteConversation)(
 LITERTLM_JNIEXPORT void JNICALL JNI_METHOD(nativeSendMessageAsync)(
     JNIEnv* env, jclass thiz, jlong conversation_pointer,
     jstring messageJSONString, jstring extraContextJsonString, jobject callback,
-    jobject visual_token_budget, jint max_output_token,
-    jobject thinking_config_obj) {
+    jobject visual_token_budget, jobject repetition_penalty_config_obj,
+    jobject no_repeat_ngram_config_obj, jobject suppress_tokens_config_obj,
+    jint max_output_token, jobject thinking_config_obj, jint constraint_type,
+    jstring constraint_string) {
   JavaVM* jvm = nullptr;
   if (env->GetJavaVM(&jvm) != JNI_OK) {
     ThrowLiteRtLmJniException(env, "Failed to get JavaVM");
@@ -1090,9 +1221,6 @@ LITERTLM_JNIEXPORT void JNICALL JNI_METHOD(nativeSendMessageAsync)(
   env->ReleaseStringUTFChars(messageJSONString, json_chars);
 
   litert::lm::OptionalArgs optional_args;
-  if (max_output_token > 0) {
-    optional_args.max_output_tokens = max_output_token;
-  }
   nlohmann::ordered_json extra_context =
       GetExtraContextJson(env, extraContextJsonString);
   if (!extra_context.is_null() && !extra_context.empty()) {
@@ -1104,9 +1232,46 @@ LITERTLM_JNIEXPORT void JNICALL JNI_METHOD(nativeSendMessageAsync)(
     optional_args.args = std::move(args);
   }
 
+  if (repetition_penalty_config_obj != nullptr) {
+    optional_args.repetition_penalty_config =
+        CreateRepetitionPenaltyConfigFromJni(env,
+                                             repetition_penalty_config_obj);
+  }
+
+  if (no_repeat_ngram_config_obj != nullptr) {
+    optional_args.no_repeat_ngram_config =
+        CreateNoRepeatNgramConfigFromJni(env, no_repeat_ngram_config_obj);
+  }
+
+  if (suppress_tokens_config_obj != nullptr) {
+    optional_args.suppress_tokens_config =
+        CreateSuppressTokensConfigFromJni(env, suppress_tokens_config_obj);
+  }
+
+  if (max_output_token > 0) {
+    optional_args.max_output_tokens = max_output_token;
+  }
+
   if (thinking_config_obj != nullptr) {
     optional_args.thinking_config =
         CreateThinkingConfigFromJni(env, thinking_config_obj);
+  }
+
+  if (constraint_type != 0) {
+    litert::lm::LlGuidanceConstraintArg constraint_arg;
+    if (constraint_type == 1) {
+      constraint_arg.constraint_type = litert::lm::LlgConstraintType::kRegex;
+    } else if (constraint_type == 2) {
+      constraint_arg.constraint_type =
+          litert::lm::LlgConstraintType::kJsonSchema;
+    }
+    if (constraint_string != nullptr) {
+      const char* constraint_chars =
+          env->GetStringUTFChars(constraint_string, nullptr);
+      constraint_arg.constraint_string = constraint_chars;
+      env->ReleaseStringUTFChars(constraint_string, constraint_chars);
+    }
+    optional_args.decoding_constraint = constraint_arg;
   }
 
   jobject callback_global = env->NewGlobalRef(callback);
@@ -1192,8 +1357,10 @@ LITERTLM_JNIEXPORT void JNICALL JNI_METHOD(nativeSendMessageAsync)(
 LITERTLM_JNIEXPORT jstring JNICALL JNI_METHOD(nativeSendMessage)(
     JNIEnv* env, jclass thiz, jlong conversation_pointer,
     jstring messageJSONString, jstring extraContextJsonString,
-    jobject visual_token_budget, jint max_output_token,
-    jobject thinking_config_obj) {
+    jobject visual_token_budget, jobject repetition_penalty_config_obj,
+    jobject no_repeat_ngram_config_obj, jobject suppress_tokens_config_obj,
+    jint max_output_token, jobject thinking_config_obj, jint constraint_type,
+    jstring constraint_string) {
   Conversation* conversation =
       reinterpret_cast<Conversation*>(conversation_pointer);
 
@@ -1202,9 +1369,6 @@ LITERTLM_JNIEXPORT jstring JNICALL JNI_METHOD(nativeSendMessage)(
   env->ReleaseStringUTFChars(messageJSONString, json_chars);
 
   litert::lm::OptionalArgs optional_args;
-  if (max_output_token > 0) {
-    optional_args.max_output_tokens = max_output_token;
-  }
   nlohmann::ordered_json extra_context =
       GetExtraContextJson(env, extraContextJsonString);
   if (!extra_context.is_null() && !extra_context.empty()) {
@@ -1216,9 +1380,46 @@ LITERTLM_JNIEXPORT jstring JNICALL JNI_METHOD(nativeSendMessage)(
     optional_args.args = std::move(args);
   }
 
+  if (repetition_penalty_config_obj != nullptr) {
+    optional_args.repetition_penalty_config =
+        CreateRepetitionPenaltyConfigFromJni(env,
+                                             repetition_penalty_config_obj);
+  }
+
+  if (no_repeat_ngram_config_obj != nullptr) {
+    optional_args.no_repeat_ngram_config =
+        CreateNoRepeatNgramConfigFromJni(env, no_repeat_ngram_config_obj);
+  }
+
+  if (suppress_tokens_config_obj != nullptr) {
+    optional_args.suppress_tokens_config =
+        CreateSuppressTokensConfigFromJni(env, suppress_tokens_config_obj);
+  }
+
+  if (max_output_token > 0) {
+    optional_args.max_output_tokens = max_output_token;
+  }
+
   if (thinking_config_obj != nullptr) {
     optional_args.thinking_config =
         CreateThinkingConfigFromJni(env, thinking_config_obj);
+  }
+
+  if (constraint_type != 0) {
+    litert::lm::LlGuidanceConstraintArg constraint_arg;
+    if (constraint_type == 1) {
+      constraint_arg.constraint_type = litert::lm::LlgConstraintType::kRegex;
+    } else if (constraint_type == 2) {
+      constraint_arg.constraint_type =
+          litert::lm::LlgConstraintType::kJsonSchema;
+    }
+    if (constraint_string != nullptr) {
+      const char* constraint_chars =
+          env->GetStringUTFChars(constraint_string, nullptr);
+      constraint_arg.constraint_string = constraint_chars;
+      env->ReleaseStringUTFChars(constraint_string, constraint_chars);
+    }
+    optional_args.decoding_constraint = constraint_arg;
   }
 
   auto response =

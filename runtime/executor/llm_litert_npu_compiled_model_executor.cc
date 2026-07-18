@@ -3683,9 +3683,6 @@ LlmLiteRtNpuCompiledModelExecutor::Create(
           mutable_settings, resources, env, llm_model, quantization_params,
           prefill_signatures);
     }
-  
-  
-  }
 };
 
 absl::StatusOr<std::unique_ptr<LlmLiteRtNpuCompiledModelExecutor>>

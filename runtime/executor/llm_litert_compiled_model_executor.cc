@@ -1168,6 +1168,15 @@ LlmLiteRtCompiledModelExecutorBase::Decode(
     }
   }
   if (has_invalid_output_token) {
+    absl::MutexLock lock(executor_settings_mutex_);
+    const auto& advanced_settings = executor_settings_.GetAdvancedSettings();
+    if (advanced_settings.has_value() &&
+        advanced_settings->error_on_invalid_sampled_token_id) {
+      return absl::InternalError(
+          "Invalid decode and sample result. The sampled token is negative. "
+          "This is caused by invalid sampling or sampling from an invalid "
+          "logits tensor, usually an overflowed logits tensor.");
+    }
     ABSL_LOG(WARNING) << "Invalid decode and sample result. The sampled token "
                          "is casted to 0 to avoid crash.";
   }

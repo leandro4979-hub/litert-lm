@@ -22,6 +22,7 @@
 #include <limits>
 #include <memory>
 #include <optional>
+#include <random>
 #include <string>
 #include <system_error>  // NOLINT: Required for std::error_code used with std::filesystem.
 #include <tuple>
@@ -43,6 +44,7 @@
 #include "litert/cc/litert_layout.h"  // from @litert
 #include "litert/cc/litert_macros.h"  // from @litert
 #include "litert/cc/litert_model.h"  // from @litert
+#include "litert/cc/litert_tensor_buffer.h"  // from @litert
 #include "litert/test/matchers.h"  // from @litert
 #include "support/tokenizer/tokenizer.h"  // from @litert
 #include "runtime/components/logits_processor/constrained_decoding/constrained_decoder.h"
@@ -50,6 +52,7 @@
 #include "runtime/components/model_resources.h"
 #include "runtime/components/model_resources_litert_lm.h"
 #include "runtime/components/model_resources_task.h"
+#include "runtime/components/sampler.h"
 #include "runtime/executor/executor_settings_base.h"
 #include "runtime/executor/llm_executor_io_types.h"
 #include "runtime/executor/llm_executor_settings.h"
@@ -246,6 +249,128 @@ TEST(LlmLiteRtCompiledModelExecutorStaticTest, DecodeTest) {
     ASSERT_EQ(output_tokens[0].size(), 1);
     EXPECT_EQ(output_tokens[0][0], 52530);
   }
+}
+
+class FakeInvalidTokenSampler : public Sampler {
+ public:
+  absl::Status SampleToIdAndScoreBuffer(
+      const TensorBuffer& logits_tensor, TensorBuffer& ids_tensor,
+      TensorBuffer* scores_tensor) override {
+    LITERT_ASSIGN_OR_RETURN(auto lock_and_addr,
+                            TensorBufferScopedLock::Create(
+                                ids_tensor, TensorBuffer::LockMode::kWrite));
+    int* ptr = static_cast<int*>(const_cast<void*>(lock_and_addr.second));
+    ptr[0] = -1;
+    return absl::OkStatus();
+  }
+
+  absl::Status UpdateConfig(
+      const proto::SamplerParameters& sampler_params, int batch_size,
+      std::shared_ptr<std::default_random_engine> rand_gen) override {
+    return absl::OkStatus();
+  }
+};
+
+class TestableLlmLiteRtCompiledModelExecutorStatic
+    : public LlmLiteRtCompiledModelExecutorStatic {
+ public:
+  static void SetSamplerForTest(LlmLiteRtCompiledModelExecutorStatic* executor,
+                                std::unique_ptr<Sampler> sampler) {
+    auto* testable =
+        static_cast<TestableLlmLiteRtCompiledModelExecutorStatic*>(executor);
+    testable->sampler_ = std::move(sampler);
+    testable->sampler_handles_input_ = false;
+  }
+};
+
+TEST(LlmLiteRtCompiledModelExecutorStaticTest,
+     ErrorOnInvalidSampledTokenId_True) {
+  auto model_path =
+      std::filesystem::path(::testing::SrcDir()) / kTestStaticModelPath;
+  ASSERT_OK_AND_ASSIGN(auto model_resources,
+                       CreateExecutorModelResourcesTask(model_path.string()));
+  ASSERT_OK_AND_ASSIGN(auto model_assets,
+                       ModelAssets::Create(model_path.string()));
+  ASSERT_OK_AND_ASSIGN(
+      auto executor_settings,
+      LlmExecutorSettings::CreateDefault(model_assets, Backend::CPU));
+  executor_settings.SetCacheDir(":nocache");
+  executor_settings.SetMaxNumTokens(kMaxNumTokens);
+  executor_settings.SetAdvancedSettings(AdvancedSettings{
+      .error_on_invalid_sampled_token_id = true,
+  });
+  ::litert::lm::CpuConfig config;
+  config.number_of_threads = kNumThreads;
+  executor_settings.SetBackendConfig(config);
+  LITERT_ASSERT_OK_AND_ASSIGN(
+      auto env, Environment::Create(std::vector<Environment::Option>()));
+  ASSERT_OK_AND_ASSIGN(auto executor,
+                       LlmLiteRtCompiledModelExecutorStatic::Create(
+                           executor_settings, env, *model_resources));
+  ASSERT_NE(executor, nullptr);
+
+  ExecutorInputs inputs;
+  const std::vector<int> input_tokens = {1, 2, 0};
+  LITERT_ASSERT_OK_AND_ASSIGN(
+      auto input_tokens_buffer,
+      CopyToTensorBuffer<int>(absl::MakeSpan(input_tokens), {1, 3}));
+  inputs.SetTextData(ExecutorTextData(std::move(input_tokens_buffer)));
+
+  EXPECT_OK(executor->Prefill(inputs));
+
+  TestableLlmLiteRtCompiledModelExecutorStatic::SetSamplerForTest(
+      executor.get(), std::make_unique<FakeInvalidTokenSampler>());
+
+  auto decode_status = executor->Decode();
+  EXPECT_EQ(decode_status.status().code(), absl::StatusCode::kInternal);
+  EXPECT_THAT(
+      decode_status.status().message(),
+      ::testing::HasSubstr(
+          "Invalid decode and sample result. The sampled token is negative."));
+}
+
+TEST(LlmLiteRtCompiledModelExecutorStaticTest,
+     ErrorOnInvalidSampledTokenId_False) {
+  auto model_path =
+      std::filesystem::path(::testing::SrcDir()) / kTestStaticModelPath;
+  ASSERT_OK_AND_ASSIGN(auto model_resources,
+                       CreateExecutorModelResourcesTask(model_path.string()));
+  ASSERT_OK_AND_ASSIGN(auto model_assets,
+                       ModelAssets::Create(model_path.string()));
+  ASSERT_OK_AND_ASSIGN(
+      auto executor_settings,
+      LlmExecutorSettings::CreateDefault(model_assets, Backend::CPU));
+  executor_settings.SetCacheDir(":nocache");
+  executor_settings.SetMaxNumTokens(kMaxNumTokens);
+  executor_settings.SetAdvancedSettings(AdvancedSettings{
+      .error_on_invalid_sampled_token_id = false,
+  });
+  ::litert::lm::CpuConfig config;
+  config.number_of_threads = kNumThreads;
+  executor_settings.SetBackendConfig(config);
+  LITERT_ASSERT_OK_AND_ASSIGN(
+      auto env, Environment::Create(std::vector<Environment::Option>()));
+  ASSERT_OK_AND_ASSIGN(auto executor,
+                       LlmLiteRtCompiledModelExecutorStatic::Create(
+                           executor_settings, env, *model_resources));
+  ASSERT_NE(executor, nullptr);
+
+  ExecutorInputs inputs;
+  const std::vector<int> input_tokens = {1, 2, 0};
+  LITERT_ASSERT_OK_AND_ASSIGN(
+      auto input_tokens_buffer,
+      CopyToTensorBuffer<int>(absl::MakeSpan(input_tokens), {1, 3}));
+  inputs.SetTextData(ExecutorTextData(std::move(input_tokens_buffer)));
+
+  EXPECT_OK(executor->Prefill(inputs));
+
+  TestableLlmLiteRtCompiledModelExecutorStatic::SetSamplerForTest(
+      executor.get(), std::make_unique<FakeInvalidTokenSampler>());
+
+  ASSERT_OK_AND_ASSIGN(auto output_tokens, executor->Decode());
+  ASSERT_EQ(output_tokens.size(), 1);
+  ASSERT_EQ(output_tokens[0].size(), 1);
+  EXPECT_EQ(output_tokens[0][0], 0);
 }
 
 TEST(LlmLiteRtCompiledModelExecutorStaticTest, ConstrainedDecodeTest) {

@@ -347,9 +347,40 @@ gpu_context_low_priority: Not set
 enable_speculative_decoding: 0
 disable_delegate_clustering: 0
 hint_kernel_batch_size: 10
+error_on_invalid_sampled_token_id: 0
 
 )");                                                 // Original output string.
   EXPECT_EQ(oss.str(), expected_output);
+}
+
+TEST(LlmExecutorConfigTest, AdvancedSettingsWithErrorOnInvalidSampledTokenId) {
+  auto model_assets = ModelAssets::Create(kPathToModel1);
+  ASSERT_OK(model_assets);
+  ASSERT_OK_AND_ASSIGN(auto settings,
+                       LlmExecutorSettings::CreateDefault(
+                           *std::move(model_assets), Backend::GPU_ARTISAN));
+  settings.SetAdvancedSettings(AdvancedSettings{
+      .error_on_invalid_sampled_token_id = true,
+  });
+
+  std::stringstream oss;
+  oss << settings;
+  EXPECT_THAT(oss.str(),
+              ::testing::HasSubstr("error_on_invalid_sampled_token_id: 1"));
+
+  settings.SetAdvancedSettings(AdvancedSettings{
+      .error_on_invalid_sampled_token_id = false,
+  });
+  oss.str("");
+  oss << settings;
+  EXPECT_THAT(oss.str(),
+              ::testing::HasSubstr("error_on_invalid_sampled_token_id: 0"));
+
+  AdvancedSettings adv1{.error_on_invalid_sampled_token_id = true};
+  AdvancedSettings adv2{.error_on_invalid_sampled_token_id = false};
+  EXPECT_NE(adv1, adv2);
+  adv2.error_on_invalid_sampled_token_id = true;
+  EXPECT_EQ(adv1, adv2);
 }
 
 TEST(LlmExecutorConfigTest, AdvancedSettingsWithGpuContextLowPriority) {

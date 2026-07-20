@@ -286,6 +286,14 @@ struct AdvancedSettings {
   // OSS models), we would set this flag to 4 to ensure smooth UI.
   std::optional<int> hint_kernel_batch_size;
 
+  // If true, the executor will return an error if an invalid token id is
+  // sampled during decoding. If false, the llm executor will continue decoding
+  // with the invalid token id, which helps batch decoding to continue even if
+  // some of the candidates have EOS token.
+  // This feature is by default false. Applications can enable it by setting it
+  // to true if they want to ensure the quality of the decoded output.
+  bool error_on_invalid_sampled_token_id = false;
+
   bool operator==(const AdvancedSettings& other) const {
     return prefill_batch_sizes == other.prefill_batch_sizes &&
            num_output_candidates == other.num_output_candidates &&
@@ -317,7 +325,9 @@ struct AdvancedSettings {
            gpu_context_low_priority == other.gpu_context_low_priority &&
            enable_speculative_decoding == other.enable_speculative_decoding &&
            disable_delegate_clustering == other.disable_delegate_clustering &&
-           hint_kernel_batch_size == other.hint_kernel_batch_size;
+           hint_kernel_batch_size == other.hint_kernel_batch_size &&
+           error_on_invalid_sampled_token_id ==
+               other.error_on_invalid_sampled_token_id;
   }
 };
 std::ostream& operator<<(std::ostream& os, const AdvancedSettings& settings);

@@ -131,6 +131,8 @@ std::ostream& operator<<(std::ostream& os, const AdvancedSettings& settings) {
   } else {
     os << "hint_kernel_batch_size: Not set\n";
   }
+  os << "error_on_invalid_sampled_token_id: "
+     << settings.error_on_invalid_sampled_token_id << "\n";
   return os;
 }
 

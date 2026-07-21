@@ -1095,8 +1095,8 @@ cc_library(
 # Interfaces
 # ==================================================================================================
 cc_library(
-    name = "kv_cache_interface",
-    hdrs = ["kv_cache_interface.h"],
+    name = "state_interface",
+    hdrs = ["state_interface.h"],
     deps = [
         "@com_google_absl//absl/status",
         "@com_google_absl//absl/status:statusor",
@@ -1109,8 +1109,8 @@ cc_library(
     hdrs = ["llm_executor_interface.h"],
     deps = [
         ":executor_settings_base",
-        ":kv_cache_interface",
         ":llm_executor_io_types",
+        ":state_interface",
         "@com_google_absl//absl/status",
         "@com_google_absl//absl/status:statusor",
         "@litert//litert/cc:litert_tensor_buffer",

@@ -18,8 +18,10 @@ import os
 from absl.testing import absltest
 from absl.testing import parameterized
 import click
+from click.testing import CliRunner
 import jsonschema
 
+from litert_lm_cli import common
 from litert_lm_cli import config
 
 
@@ -370,6 +372,142 @@ class ConfigTest(parameterized.TestCase):
       prefix = f"{path_str}: " if path_str else ""
       expected_err_prefix = f"config.json validation error: {prefix}"
       self.assertIn(expected_err_prefix, custom_error)
+
+  def test_set_and_get_config_path(self):
+    custom_path = os.path.join(self.temp_dir.full_path, "my_config.json")
+    config.set_config_path(custom_path)
+    self.assertEqual(config.get_config_path(), custom_path)
+
+    config.set_config_path(None)
+    self.assertEqual(
+        config.get_config_path(),
+        os.path.join(self.temp_dir.full_path, "config.json"),
+    )
+
+  def test_clear_cache_resets_custom_config_path(self):
+    custom_path = os.path.join(self.temp_dir.full_path, "my_config.json")
+    config.set_config_path(custom_path)
+    self.assertEqual(config.get_config_path(), custom_path)
+
+    config._clear_cache()
+    self.assertEqual(
+        config.get_config_path(),
+        os.path.join(self.temp_dir.full_path, "config.json"),
+    )
+
+  def test_load_config_with_custom_path_arg(self):
+    custom_path = os.path.join(self.temp_dir.full_path, "custom.json")
+    with open(custom_path, "w", encoding="utf-8") as f:
+      f.write('{"default": {"backend": "npu"}}')
+
+    app_cfg = config.load_config(custom_path)
+    self.assertEqual(app_cfg.default.backend, "npu")
+
+  def test_load_config_with_set_config_path(self):
+    custom_path = os.path.join(self.temp_dir.full_path, "custom.json")
+    with open(custom_path, "w", encoding="utf-8") as f:
+      f.write('{"models": {"my-model": {"backend": "gpu"}}}')
+
+    config.set_config_path(custom_path)
+    model_cfg = config.get_model_config("my-model")
+    self.assertEqual(model_cfg.backend, "gpu")
+
+  def test_custom_config_invalid_json_error_message(self):
+    custom_path = os.path.join(self.temp_dir.full_path, "my_custom.json")
+    with open(custom_path, "w", encoding="utf-8") as f:
+      f.write("invalid json")
+
+    config.set_config_path(custom_path)
+    with self.assertRaises(click.ClickException) as ctx:
+      config.load_config()
+    self.assertIn("Failed to parse my_custom.json", str(ctx.exception))
+
+  def test_load_config_empty_file(self):
+    empty_path = os.path.join(self.temp_dir.full_path, "empty.json")
+    with open(empty_path, "w", encoding="utf-8") as f:
+      f.write("")
+
+    app_cfg = config.load_config(empty_path)
+    self.assertEqual(app_cfg, config.AppConfig())
+
+  def test_load_config_dev_null(self):
+    if not os.path.exists("/dev/null"):
+      self.skipTest("/dev/null not available")
+    config.set_config_path("/dev/null")
+    app_cfg = config.load_config()
+    self.assertEqual(app_cfg, config.AppConfig())
+    model_cfg = config.get_model_config("some-model")
+    self.assertEqual(model_cfg, config.ModelConfig())
+
+  def test_parse_config_opt(self):
+    common.parse_config_opt(None, None, "/path/to/custom.json")
+    self.assertEqual(config.get_config_path(), "/path/to/custom.json")
+
+    common.parse_config_opt(None, None, None)
+    self.assertEqual(config.get_config_path(), "/path/to/custom.json")
+
+  def test_config_option_sets_custom_config_path(self):
+    @click.command()
+    @common.config_option
+    def dummy_cmd():
+      click.echo(f"config_path: {config.get_config_path()}")
+
+    custom_file = os.path.join(self.temp_dir.full_path, "custom.json")
+    with open(custom_file, "w", encoding="utf-8") as f:
+      f.write("{}")
+
+    runner = CliRunner()
+    result = runner.invoke(dummy_cmd, ["--config", custom_file])
+    self.assertEqual(result.exit_code, 0)
+    self.assertIn(f"config_path: {custom_file}", result.output)
+
+  def test_config_option_non_existent_file(self):
+    @click.command()
+    @common.config_option
+    def dummy_cmd():
+      pass
+
+    runner = CliRunner()
+    result = runner.invoke(
+        dummy_cmd, ["--config", "/nonexistent/path/config.json"]
+    )
+    self.assertNotEqual(result.exit_code, 0)
+    self.assertIn("does not exist", result.output)
+
+  def test_config_option_directory_rejected(self):
+    @click.command()
+    @common.config_option
+    def dummy_cmd():
+      pass
+
+    runner = CliRunner()
+    result = runner.invoke(dummy_cmd, ["--config", self.temp_dir.full_path])
+    self.assertNotEqual(result.exit_code, 0)
+    self.assertIn("is a directory", result.output)
+
+  def test_config_option_is_eager(self):
+    events = []
+
+    def normal_callback(ctx, param, value):
+      events.append("normal_callback")
+      return value
+
+    @click.command()
+    @click.option("--normal", callback=normal_callback)
+    @common.config_option
+    def dummy_cmd(normal):
+      pass
+
+    custom_file = os.path.join(self.temp_dir.full_path, "custom.json")
+    with open(custom_file, "w", encoding="utf-8") as f:
+      f.write("{}")
+
+    runner = CliRunner()
+    result = runner.invoke(
+        dummy_cmd, ["--normal", "val", "--config", custom_file]
+    )
+    self.assertEqual(result.exit_code, 0)
+    self.assertEqual(config.get_config_path(), custom_file)
 
 
 if __name__ == "__main__":

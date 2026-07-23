@@ -12,32 +12,42 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-#include "omni/asr/token_merger.h"
+#include "omni/asr/levenshtein_text_merger.h"
 
 #include <cstddef>
 #include <string>
 #include <vector>
 
+#include "absl/status/statusor.h"  // from @com_google_absl
 #include "absl/strings/str_join.h"  // from @com_google_absl
 #include "absl/types/span.h"  // from @com_google_absl
+#include "omni/asr/detokenizer.h"
 #include "omni/asr/levenshtein_align.h"
+#include "omni/asr/text_merger.h"
 
 namespace litert_lm::omni::asr {
 
-void TokenMerger::Reset() { unconfirmed_words_.clear(); }
+void LevenshteinTextMerger::Reset() { unconfirmed_words_.clear(); }
 
-MergeResult TokenMerger::Merge(absl::Span<const std::string> curr_chunk_words) {
+absl::StatusOr<TextMerger::MergeResult> LevenshteinTextMerger::Merge(
+    absl::Span<const Detokenizer::Word> curr_chunk_words) {
+  std::vector<std::string> curr_words;
+  curr_words.reserve(curr_chunk_words.size());
+  for (const auto& w : curr_chunk_words) {
+    curr_words.push_back(w.text);
+  }
+
   MergeResult result;
 
   if (unconfirmed_words_.empty()) {
     // Initial chunk: cache words as unconfirmed state.
-    unconfirmed_words_.assign(curr_chunk_words.begin(), curr_chunk_words.end());
+    unconfirmed_words_.assign(curr_words.begin(), curr_words.end());
     result.confirmed_text = "";
     result.unconfirmed_text = absl::StrJoin(unconfirmed_words_, " ");
     return result;
   }
 
-  if (curr_chunk_words.empty()) {
+  if (curr_words.empty()) {
     // Empty current chunk: confirm all cached unconfirmed words.
     result.confirmed_text = absl::StrJoin(unconfirmed_words_, " ");
     result.unconfirmed_text = "";
@@ -46,7 +56,7 @@ MergeResult TokenMerger::Merge(absl::Span<const std::string> curr_chunk_words) {
   }
 
   std::vector<AlignCode> alignment =
-      AlignTokens(unconfirmed_words_, curr_chunk_words);
+      AlignTokens(unconfirmed_words_, curr_words);
 
   size_t ref_idx = 0;
   size_t hyp_idx = 0;
@@ -83,13 +93,13 @@ MergeResult TokenMerger::Merge(absl::Span<const std::string> curr_chunk_words) {
     result.confirmed_text = absl::StrJoin(unconfirmed_words_, " ");
   }
 
-  unconfirmed_words_.assign(curr_chunk_words.begin(), curr_chunk_words.end());
+  unconfirmed_words_.assign(curr_words.begin(), curr_words.end());
   result.unconfirmed_text = absl::StrJoin(unconfirmed_words_, " ");
 
   return result;
 }
 
-MergeResult TokenMerger::Flush() {
+absl::StatusOr<TextMerger::MergeResult> LevenshteinTextMerger::Flush() {
   MergeResult result;
   result.confirmed_text = absl::StrJoin(unconfirmed_words_, " ");
   result.unconfirmed_text = "";

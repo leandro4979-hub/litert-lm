@@ -12,38 +12,34 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-#ifndef THIRD_PARTY_ODML_LITERT_LM_OMNI_ASR_TOKEN_MERGER_H_
-#define THIRD_PARTY_ODML_LITERT_LM_OMNI_ASR_TOKEN_MERGER_H_
+#ifndef THIRD_PARTY_ODML_LITERT_LM_OMNI_ASR_LEVENSHTEIN_TEXT_MERGER_H_
+#define THIRD_PARTY_ODML_LITERT_LM_OMNI_ASR_LEVENSHTEIN_TEXT_MERGER_H_
 
 #include <string>
 #include <vector>
 
+#include "absl/status/statusor.h"  // from @com_google_absl
 #include "absl/types/span.h"  // from @com_google_absl
+#include "omni/asr/detokenizer.h"
+#include "omni/asr/text_merger.h"
 
 namespace litert_lm::omni::asr {
 
-// Output result of token merging for a single audio chunk.
-struct MergeResult {
-  // Finalized text that will not change in subsequent chunks.
-  std::string confirmed_text;
-  // Pending text that is subject to alignment and change in the next chunk.
-  std::string unconfirmed_text;
-};
-
-// Aligns and merges overlapping word streams from consecutive audio chunks.
-class TokenMerger {
+// Aligns and merges overlapping word streams from consecutive audio chunks
+// using Levenshtein distance sequence alignment.
+class LevenshteinTextMerger : public TextMerger {
  public:
-  TokenMerger() = default;
+  LevenshteinTextMerger() = default;
 
   // Resets internal cached state for a new audio stream.
-  void Reset();
+  void Reset() override;
 
-  // Processes a new audio chunk's words, aligning with cached unconfirmed
-  // words. Updates internal state and returns confirmed and unconfirmed text.
-  MergeResult Merge(absl::Span<const std::string> curr_chunk_words);
+  // Merges curr_chunk_words into internal state and returns result.
+  absl::StatusOr<MergeResult> Merge(
+      absl::Span<const Detokenizer::Word> curr_chunk_words) override;
 
-  // Flushes all remaining unconfirmed words as confirmed text at end of stream.
-  MergeResult Flush();
+  // Flushes remaining unconfirmed text at end of stream.
+  absl::StatusOr<MergeResult> Flush() override;
 
   // Returns cached unconfirmed words.
   absl::Span<const std::string> unconfirmed_words() const {
@@ -56,4 +52,4 @@ class TokenMerger {
 
 }  // namespace litert_lm::omni::asr
 
-#endif  // THIRD_PARTY_ODML_LITERT_LM_OMNI_ASR_TOKEN_MERGER_H_
+#endif  // THIRD_PARTY_ODML_LITERT_LM_OMNI_ASR_LEVENSHTEIN_TEXT_MERGER_H_
